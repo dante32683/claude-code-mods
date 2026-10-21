@@ -7,26 +7,38 @@
   "plugins": [
     {
       "name": "agent-crabs",
+      "description": "Above the prompt, one animated pixel Clawd per running subagent, acting out what it is doing now.",
+      "version": "0.5.5",
       "source": "./agent-crabs"
     },
     {
       "name": "usage-context",
+      "description": "A pane (terminal and Desktop) and a terminal band showing 5-hour and weekly plan usage with burn rate, and where the context window is going.",
+      "version": "0.1.0",
       "source": "./usage-context"
     },
     {
       "name": "compact-plus",
+      "description": "Better compaction: a searchable history file, handoff-style summary instructions, your messages kept word for word, fresh instruction files, and compaction at turn end while you read.",
+      "version": "0.1.0",
       "source": "./compact-plus"
     },
     {
       "name": "repo-peers",
+      "description": "Tells Claude when other Claude chats are working in the same repo, and which files they edit, so it can message them before work collides.",
+      "version": "0.1.0",
       "source": "./repo-peers"
     },
     {
       "name": "aside",
+      "description": "/aside <task>: a background worker (Haiku; \"opus:\" for Opus) does a side task with tools while the chat goes on; its answer opens in a pane with Send to chat.",
+      "version": "0.1.0",
       "source": "./aside"
     },
     {
       "name": "bash-fixes",
+      "description": "Fixes for Claude's Bash tool on Windows Git Bash: long commands run from a temp script, rg keeps patterns that start with /, a sed -i that changes nothing fails, rm targets that start with a variable get a ${VAR:?} guard, and a double-quoted pwsh -Command body with $ is refused.",
+      "version": "0.4.0",
       "source": "./bash-fixes"
     }
   ]

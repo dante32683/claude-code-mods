@@ -6,13 +6,14 @@ A few mods for Claude Code that I use every day. They work in the terminal and i
 
 ## Install
 
-In a Claude Code terminal session:
+From a shell:
 
 ```
-/plugin install agent-crabs --marketplace dante32683/claude-code-mods
+claude plugin marketplace add dante32683/claude-code-mods
+claude plugin install agent-crabs@dante32683-mods
 ```
 
-Swap `agent-crabs` for any mod below. From a shell, it's `claude plugin install agent-crabs --marketplace dante32683/claude-code-mods`. In the desktop app, click + next to the prompt box, then Plugins, add the marketplace `dante32683/claude-code-mods`, and pick the mods you want.
+Swap `agent-crabs` for any mod below. In the desktop app, click + next to the prompt box, then Plugins, add the marketplace `dante32683/claude-code-mods`, and pick the mods you want.
 
 Mods load when a chat starts, so open a new chat after installing.
 
