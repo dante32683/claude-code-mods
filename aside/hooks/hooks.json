@@ -1,0 +1,4 @@
+{
+  "description": "aside hooks module",
+  "modules": ["./register.ts"]
+}

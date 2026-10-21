@@ -1,0 +1,4 @@
+{
+  "description": "compact-plus hooks module",
+  "modules": ["./register.js"]
+}

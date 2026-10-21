@@ -1,0 +1,4 @@
+{
+  "description": "usage-context hooks module",
+  "modules": ["./register.js"]
+}

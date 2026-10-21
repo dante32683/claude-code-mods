@@ -1,0 +1,8 @@
+{
+  "name": "bash-fixes",
+  "version": "0.4.0",
+  "description": "Fixes for Claude's Bash tool on Windows Git Bash: long commands run from a temp script, rg keeps patterns that start with /, a sed -i that changes nothing fails, rm targets that start with a variable get a ${VAR:?} guard, and a double-quoted pwsh -Command body with $ is refused.",
+  "author": {
+    "name": "dante32683"
+  }
+}

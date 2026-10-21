@@ -1,0 +1,33 @@
+{
+  "name": "dante32683-mods",
+  "owner": {
+    "name": "dante32683"
+  },
+  "description": "Claude Code mods: animated subagent crabs, a usage pane, better compaction, and more.",
+  "plugins": [
+    {
+      "name": "agent-crabs",
+      "source": "./agent-crabs"
+    },
+    {
+      "name": "usage-context",
+      "source": "./usage-context"
+    },
+    {
+      "name": "compact-plus",
+      "source": "./compact-plus"
+    },
+    {
+      "name": "repo-peers",
+      "source": "./repo-peers"
+    },
+    {
+      "name": "aside",
+      "source": "./aside"
+    },
+    {
+      "name": "bash-fixes",
+      "source": "./bash-fixes"
+    }
+  ]
+}

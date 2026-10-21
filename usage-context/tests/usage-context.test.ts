@@ -1,0 +1,205 @@
+import { expect, mock, test } from 'claude-code/testing'
+
+const HOUR = 3_600_000
+const NOW = Date.parse('2026-10-02T12:00:00Z')
+
+const category = (name: string, tokens: number, kind = 'used') => ({ name, tokens, color: 'inactive', isDeferred: kind === 'deferred', kind })
+
+const breakdown = {
+  categories: [
+    category('System prompt', 8_000),
+    category('System tools', 12_000),
+    category('Memory files', 6_000),
+    category('Messages', 120_000),
+    category('Free space', 700_000, 'free'),
+    category('Autocompact buffer', 40_000, 'buffer'),
+    category('Deferred tools', 30_000, 'deferred'),
+  ],
+  totalTokens: 146_000,
+  maxTokens: 400_000,
+  rawMaxTokens: 400_000,
+  autocompactSource: 'window',
+  percentage: 15,
+  gridRows: [],
+  model: 'opus',
+  memoryFiles: [{ path: 'C:\\Users\\x\\repo\\AGENTS.md', type: 'Project', tokens: 4_000 }],
+  mcpTools: [{ name: 'mcp__a__b', serverName: 'a', tokens: 900, isLoaded: true }],
+  agents: [{ agentType: 'sonnet-high', source: 'userSettings', tokens: 200 }],
+  skills: { totalSkills: 1, includedSkills: 1, tokens: 300, skillFrontmatter: [{ name: 'run', source: 'built-in', tokens: 300 }] },
+  autoCompactThreshold: 800_000,
+  isAutoCompactEnabled: true,
+  apiUsage: null,
+}
+
+const PANE = {
+  plugin: 'usage-context',
+  component: 'Pane',
+  requestId: 'usage-context',
+  viewport: { columns: 120, rows: 40 },
+  props: { title: 'Usage & context', isFocused: false, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+} as const
+
+const BAND = {
+  plugin: 'usage-context',
+  component: 'AbovePrompt',
+  requestId: 'band',
+  viewport: { columns: 120, rows: 40 },
+  props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns: 120, scroll: { offset: 0, bodyRows: 8 }, view: {} },
+} as const
+
+function stubs(on: any, store: Map<string, unknown>, rateLimits: unknown[], band: unknown = { type: 'engine', ref: 1 }) {
+  mock.clock(on, { now: NOW })
+  on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', ($: any, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('store.delete', ($: any, e: any) => (store.delete(e.key), { value: undefined }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('env.get', ($: any, e: any) => ({ value: e.name === 'USERPROFILE' ? 'C:\\Users\\x' : undefined }))
+  on('fs.read', ($: any, e: any) => ({
+    value: String(e.path).endsWith('.claude.json') ? JSON.stringify({ oauthAccount: { organizationRateLimitTier: 'default_claude_max_5x' } }) : '{}',
+  }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.usage', () => ({
+    value: {
+      context: { tokens: 146_000, window: 1_000_000, percent: 15, breakdown },
+      rateLimits,
+    },
+  }))
+  // In the band, the engine's own (empty) drawing unless a test puts another plugin's tree there.
+  on('ui.render', ($: any, e: any) => (e.component === 'AbovePrompt' ? band : { type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+}
+
+const limits = (fiveHourPct: number) => [
+  { kind: 'five_hour', percentUsed: fiveHourPct, resetsAt: new Date(NOW + 3 * HOUR).toISOString() },
+  { kind: 'seven_day', percentUsed: 7, resetsAt: new Date(NOW + 4 * 24 * HOUR).toISOString() },
+]
+
+test('the pane draws usage and the context breakdown in both apps', async ($, on) => {
+  stubs(on, new Map(), limits(52))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: 'Plan usage' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ +52%$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^System prompt/ })).toBeDefined()
+    // The breakdown's window (as the app shows it), not the measured 1M.
+    expect(await ui.find({ type: 'Text', text: '  146k / 400k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '37%' })).toBeDefined()
+    // The desktop draws the bar as an SVG; the terminal as glyphs.
+    // The desktop draws the plan and context bars as SVG in the app's colours; the terminal as glyphs.
+    const bars = await ui.findAll({ type: 'Svg' })
+    expect(bars.length).toBe(surface === 'desktop' ? 3 : 0)
+    if (surface === 'desktop') {
+      // Messages is the largest used category, so it takes the app's first colour.
+      expect(bars[2]?.props.source).toContain('fill="#3987e5"')
+      const first = (await ui.findAll({ type: 'Text', text: /^■ $/ }))[0]
+      expect(first?.props.color).toBe('#3987e5')
+    }
+    expect(await ui.find({ key: 'exact' })).toBeDefined()
+    // Open the memory-file list, check it, and close it again for the next app.
+    await ui.press({ key: 'toggle-files' })
+    expect(await ui.find({ type: 'Text', text: /AGENTS\.md/ })).toBeDefined()
+    await ui.press({ key: 'toggle-files' })
+    await ui.unmount()
+  }
+})
+
+test('the band draws the usage rows in the terminal', async ($, on) => {
+  stubs(on, new Map(), limits(52))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ +52%$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h $/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a fast recent pace shows full-in time and saves samples', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const id = 'rl:main:five_hour:' + Math.round((NOW + 3 * HOUR) / HOUR)
+  // 40 minutes ago the window stood at 30%; now it is 52%: 33%/h.
+  store.set(id, [[NOW - 40 * 60_000, 30]])
+  stubs(on, store, limits(52))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /now 3\d%\/h/})).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^full in / })).toBeDefined()
+  expect((store.get(id) as unknown[]).length).toBe(2)
+  await ui.unmount()
+})
+
+test('before any reading the band says it is waiting', async ($, on) => {
+  stubs(on, new Map(), [])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /waiting for the first response/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane names the plan and shows the budget left per hour', async ($, on) => {
+  stubs(on, new Map(), limits(52))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'Plan usage' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Max 5x' })).toBeDefined()
+  // 48% left over the 3 hours to the reset: 16%/h.
+  expect(await ui.find({ type: 'Text', text: /budget 16%\/h/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a young weekly window does not project its first hours across the week', async ($, on) => {
+  // 5% used two hours into the week: a straight line says 420%, but the
+  // average divides by at least a day, so the week ends near 40%.
+  stubs(on, new Map(), [{ kind: 'seven_day', percentUsed: 5, resetsAt: new Date(NOW + 166 * HOUR).toISOString() }])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ends near 40%$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^full in / })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a window that started over mid-way (a plan upgrade) ignores the old count', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const reset = NOW + 3 * HOUR
+  const id = 'rl:main:seven_day:' + Math.round(reset / HOUR)
+  // 95% a day ago on the old plan, 0% after the upgrade two hours ago, 1% now.
+  store.set(id, [[NOW - 26 * HOUR, 90], [NOW - 20 * HOUR, 95], [NOW - 2 * HOUR, 0]])
+  stubs(on, store, [{ kind: 'seven_day', percentUsed: 1, resetsAt: new Date(reset).toISOString() }])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // Only two hours since the drop: too little for a weekly recent rate, so the
+  // average shows, and no budget with under a day left.
+  expect(await ui.find({ type: 'Text', text: /now 0\.0%/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /budget/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a live reading refreshes the saved fallback', async ($, on) => {
+  const writes: Record<string, string> = {}
+  stubs(on, new Map(), limits(52))
+  on('fs.write', ($: any, e: any) => ((writes[e.path] = e.text), { value: undefined }))
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  const saved = JSON.parse(writes['C:\\Users\\x\\.claude\\statusline-limits.json'] ?? '{}')
+  expect(saved.five_hour).toEqual({ used_percentage: 52, resets_at: Math.round((NOW + 3 * HOUR) / 1000) })
+  expect(saved.seven_day.used_percentage).toBe(7)
+})
+
+test('a drop in the figure starts the saved samples over', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const id = 'rl:main:five_hour:' + Math.round((NOW + 3 * HOUR) / HOUR)
+  store.set(id, [[NOW - 40 * 60_000, 80]])
+  stubs(on, store, limits(5))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(store.get(id)).toEqual([[NOW, 5]])
+})
+
+test("another plugin's band (a form) gets the band to itself", async ($, on) => {
+  // Beneath this mod: another plugin drawing its form in the band.
+  stubs(on, new Map(), limits(52), { type: 'Text', props: {}, children: ['a form'] })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: 'a form' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ +52%$/ })).toBeUndefined()
+  await ui.unmount()
+})

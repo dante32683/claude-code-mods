@@ -1,0 +1,9 @@
+{
+  "name": "aside",
+  "version": "0.1.0",
+  "description": "/aside <task>: a background worker (Haiku; \"opus:\" for Opus) does a side task with tools while the chat goes on; its answer opens in a pane with Send to chat.",
+  "author": {
+    "name": "dante32683"
+  },
+  "types": "./types/index.d.ts"
+}

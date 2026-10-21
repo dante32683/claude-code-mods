@@ -1,0 +1,20 @@
+{
+  "name": "compact-plus",
+  "version": "0.1.0",
+  "description": "Better compaction: a searchable history file, handoff-style summary instructions, your messages kept word for word, fresh instruction files, and compaction at turn end while you read.",
+  "author": { "name": "dante32683" },
+  "userConfig": {
+    "turnEndPercent": {
+      "type": "number",
+      "title": "Compact at turn end from (% of the auto-compact threshold)",
+      "description": "When a turn ends with the context at or past this share of the auto-compact threshold, compact right away, while you read the reply. 0 turns it off.",
+      "default": 90
+    },
+    "verbatimUserTokens": {
+      "type": "number",
+      "title": "Tokens of your own messages kept word for word",
+      "description": "Your messages, newest first, appended verbatim to each compaction summary and carried across compactions. 0 turns it off.",
+      "default": 8000
+    }
+  }
+}

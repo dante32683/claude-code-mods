@@ -1,0 +1,6 @@
+{
+  "name": "usage-context",
+  "version": "0.1.0",
+  "description": "A pane (terminal and Desktop) and a terminal band showing 5-hour and weekly plan usage with burn rate, and where the context window is going.",
+  "author": { "name": "dante32683" }
+}
