@@ -1,13 +1,13 @@
 // bash-fixes: fixes for Claude's Bash tool on Windows Git Bash.
 //
 // tool.check: refuse `pwsh -Command "..."` whose double-quoted body holds a $
-//             Bash would expand before PowerShell sees it, and turn the rm
-//             safety asks the guard below can't clear (rm in a -c script, an
-//             unguardable variable) into a refusal saying what to write.
+//             Bash would expand before PowerShell sees it, and refuse the rm
+//             commands the guard below can't make safe (rm in a -c script, an
+//             unguardable variable), saying what to write instead.
 // tool.call:  source hooks/guards.sh first (rg keeps patterns that start
 //             with /, a no-op `sed -i` fails), add the :? guard to rm targets
-//             that start with a variable so the built-in empty-variable rm
-//             check passes without asking, then run a command the Windows
+//             that start with a variable so an empty variable stops the
+//             command instead of deleting from /, then run a command the Windows
 //             command line would cut off or corrupt from a self-deleting
 //             temp script.
 import type { Register, EngineInterface } from 'claude-code'
