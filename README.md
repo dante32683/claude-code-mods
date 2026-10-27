@@ -45,6 +45,10 @@ Tells Claude when other Claude chats are working in the same repo (same checkout
 
 Windows Git Bash only. It fixes a few ways Claude's Bash tool breaks there: very long commands get cut off or mangled, `rg` patterns starting with `/` get turned into Windows paths, `sed -i` doesn't say when nothing changed, and `rm "${DIR:?}"/...` keeps asking for approval.
 
+## Development
+
+`./check.sh` validates every mod and runs its tests; `./check.sh bash-fixes` checks one.
+
 ## Credits
 
 agent-crabs takes its idea from [hamzafer's agent-radar](https://github.com/hamzafer/claude-code-mods) (MIT), and Clawd's shape from Codrops' article on reverse-engineering Claude's mascot animations. Clawd is Anthropic's mascot; this is a fan project, not affiliated with Anthropic. compact-plus's summary style is modeled on OpenAI's Codex CLI.
