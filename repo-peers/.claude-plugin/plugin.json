@@ -1,6 +1,6 @@
 {
   "name": "repo-peers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tells Claude when other Claude chats are working in the same repo, and which files they edit, so it can message them before work collides.",
   "author": {
     "name": "dante32683"

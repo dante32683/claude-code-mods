@@ -28,3 +28,8 @@ export function scriptText(command: string): string {
 export function sourceCommand(path: string): string {
   return `source '${path}'`
 }
+
+// A child bash honors -e; the tool's own shell can't (see needsErrexit).
+export function errexitCommand(path: string): string {
+  return `bash -e '${path}'`
+}

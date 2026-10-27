@@ -9,11 +9,13 @@
 //   source flashes it blank while it reloads, so a new pose loads hidden beside the one
 //   showing and takes over after WARM_MS. Only those two are mounted, because the app
 //   refuses a drawing over 100,000 characters.
+//   A new crab's first pose warms the same way, with its first frame drawn as a plain
+//   image Svg (no frame to load) until then, so the crab shows the moment its row does.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Activity, Crab } from '../types'
-import { crabGlyph, crabSvg } from './sprite'
+import { crabGlyph, crabStill, crabSvg } from './sprite'
 
 const SHOW_DONE_MS = 20_000
 const WARM_MS = 900 // a new pose loads hidden this long before it shows
@@ -24,6 +26,7 @@ const KEEP = 20
 const LIVE = new Set(['pending', 'running', 'waiting'])
 export const ACTIVITIES: Activity[] = ['think', 'read', 'search', 'edit', 'run', 'web', 'done', 'failed']
 const SVGS = Object.fromEntries(ACTIVITIES.map(a => [a, crabSvg(a)])) as Record<Activity, string>
+const STILLS = Object.fromEntries(ACTIVITIES.map(a => [a, crabStill(a)])) as Record<Activity, string>
 
 // A new activity; its pose shows once it has loaded (see tick).
 export function setActivity(c: Crab, activity: Activity, at: number): Crab {
@@ -114,8 +117,13 @@ export const register: Register = on => {
       <Box key={`crab-${c.id}`} flexDirection="row" alignItems="center" gap={1}>
         {isDesktop && Svg ? (
           <Box key={`art-${c.id}`} width={6} height={2}>
+            {warming(c, at) && (
+              <Box key="still">
+                <Svg key="still" source={STILLS[c.shown]} alt={`crab ${c.shown} still`} width={48} height={28} />
+              </Box>
+            )}
             {[...new Set([c.shown, c.activity])].map(a => (
-              <Box key={`pose-${a}`} display={a === c.shown && (at || Date.now()) - c.startedAt >= WARM_MS ? 'flex' : 'none'}>
+              <Box key={`pose-${a}`} display={a === c.shown && !warming(c, at) ? 'flex' : 'none'}>
                 <Svg key={`sprite-${a}`} source={SVGS[a]} alt={`crab ${a}`} width={48} height={28} isInteractive />
               </Box>
             ))}
@@ -201,6 +209,11 @@ async function finish($: EngineInterface, id: string, failed: boolean) {
         : c,
     ),
   )
+}
+
+// A new crab's first pose is still loading hidden.
+export function warming(c: Pick<Crab, 'startedAt'>, at: number) {
+  return (at || Date.now()) - c.startedAt < WARM_MS
 }
 
 export function isShown(c: Crab, at: number) {

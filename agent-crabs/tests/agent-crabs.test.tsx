@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { ACTIVITIES, demoStep, describe as describeCall, elapsed, isShown, setActivity, settle } from '../hooks/register'
-import { crabSvg } from '../hooks/sprite'
+import { crabStill, crabSvg } from '../hooks/sprite'
 
 const BAND = {
   plugin: 'agent-crabs',
@@ -42,8 +42,8 @@ test('a running subagent gets a crab and its current activity', async ($, on) =>
   expect(list[0]).toMatchObject({ busy: 0, activity: 'read' })
 
   const desk = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const svg: any = await desk.find({ type: 'Svg' })
-  expect(svg?.props.isInteractive).toBe(true)
+  const svg: any = (await desk.findAll({ type: 'Svg' })).find((s: any) => s.props.isInteractive)
+  expect(svg?.props.alt).toBe('crab think') // 'read' is still loading hidden
   expect(svg?.props.source).toContain('attributeName="visibility"')
   expect((await desk.find({ type: 'Text', text: /Find mod examples/ }))).toBeDefined()
   expect((await desk.find({ type: 'Text', text: /reading TODO\.md/ }))).toBeDefined()
@@ -75,6 +75,18 @@ test('a finished subagent hops, a failed one goes gray', async ($, on) => {
   await ui.unmount()
 })
 
+test('a just-spawned crab shows its first frame at once while its pose loads', async ($, on) => {
+  stubs(on)
+  await spawnOne($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const svgs: any[] = await ui.findAll({ type: 'Svg' })
+  const still = svgs.find(s => !s.props.isInteractive)
+  expect(still?.props.alt).toBe('crab think still')
+  expect(still?.props.source).not.toContain('<animate')
+  expect(svgs.filter(s => s.props.isInteractive).map(s => s.props.alt)).toEqual(['crab think'])
+  await ui.unmount()
+})
+
 test('activities and labels', () => {
   expect(describeCall({ tool: 'Grep', pattern: 'agent.spawn' })).toEqual({ activity: 'search', detail: 'searching agent.spawn' })
   expect(describeCall({ tool: 'Edit', file_path: 'C:\\mods\\hooks\\register.tsx' })).toEqual({ activity: 'edit', detail: 'editing register.tsx' })
@@ -86,6 +98,7 @@ test('activities and labels', () => {
   for (const a of ['think', 'read', 'search', 'edit', 'run', 'web', 'done', 'failed'] as const) {
     expect(crabSvg(a).startsWith('<svg')).toBe(true)
     expect(crabSvg(a).length).toBeLessThan(131072)
+    expect(crabStill(a).startsWith('<svg')).toBe(true)
   }
 })
 
@@ -94,7 +107,7 @@ test('a new pose loads beside the one showing, and the band stays under the size
   await spawnOne($)
   await ($ as any).tool.call({ tool: 'Grep', pattern: 'x', agentId: 'a1' })
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const alts = (await ui.findAll({ type: 'Svg' })).map((s: any) => s.props.alt)
+  const alts = (await ui.findAll({ type: 'Svg' })).filter((s: any) => s.props.isInteractive).map((s: any) => s.props.alt)
   expect(alts.sort()).toEqual(['crab search', 'crab think'])
   await ui.unmount()
   // Four rows mid-swap, each holding the two largest poses, fit in a 100,000-character drawing.

@@ -1,5 +1,14 @@
 import { test, expect } from 'claude-code/testing'
-import { guardRmTargets, hasExpandedPwshDollar, rmAskAdvice, withGuards } from '../hooks/guards'
+import {
+  guardRmTargets,
+  hasExpandedPwshDollar,
+  needsErrexit,
+  needsPipefail,
+  rmAskAdvice,
+  topLevelLines,
+  withGuards,
+  withPipefail,
+} from '../hooks/guards'
 
 test('a double-quoted pwsh body with $ is caught', () => {
   expect(hasExpandedPwshDollar('pwsh -NoProfile -Command "1,2 | % { $_ * 10 }"')).toBe(true)
@@ -77,4 +86,40 @@ test('other asks pass through', () => {
   expect(rmAskAdvice("Dangerous rm operation detected: '/'")).toBeUndefined()
   expect(rmAskAdvice("Dangerous rm operation detected in `rm -rf /`. The target '/' is the filesystem root.")).toBeUndefined()
   expect(rmAskAdvice('Command contains a git push')).toBeUndefined()
+})
+
+test('pipefail turns on where a pipeline gates what follows', () => {
+  expect(withPipefail('npm test | tail -1 && git commit -m x')).toBe('set -o pipefail; npm test | tail -1 && git commit -m x')
+  expect(needsPipefail('git push -q 2>&1 | tail -1')).toBe(true)
+  expect(needsPipefail('git -C repo commit -qm x | tail -1; git log -1')).toBe(true)
+  expect(needsPipefail('check | grep ok || echo failed')).toBe(true)
+})
+
+test('pipefail stays off for plain pipelines and chains without a pipe', () => {
+  for (const c of ['rg x | head -5', 'git log --oneline | head -3', 'a && b || c', 'ls; git status | head', 'cmd |& tee log', 'set -o pipefail; a | b && c'])
+    expect(needsPipefail(c)).toBe(false)
+  expect(withPipefail('rg x | wc -l')).toBe('rg x | wc -l')
+})
+
+test('errexit turns on when a git write follows other top-level lines', () => {
+  expect(needsErrexit("python edit.py\ngit commit -qam x")).toBe(true)
+  expect(needsErrexit("cd repo\nmake check\ngit push")).toBe(true)
+  expect(needsErrexit("edits <<'EOF'\n=== a.md\nEOF\ngit -C r commit -qam x")).toBe(true) // a line after the heredoc
+  expect(needsErrexit('git commit -m "subject\n\nbody"')).toBe(true) // a multi-line string counts; harmless
+  expect(needsErrexit('set -euo pipefail\nmake\ngit push')).toBe(true) // its own set -e does nothing in the tool's shell
+})
+
+test('errexit stays off for one-line chains, heredoc bodies, and commands without a git write', () => {
+  for (const c of [
+    'npm test && git commit -qam x',
+    "edits <<'EOF' && git commit -qam x && git push\n=== a.md\n--- old\nx\n+++ new\ny\nEOF",
+    "cat > f <<-EOF && git add f && git commit -qm f\n\tbody\n\tEOF\n",
+    'python a.py \\\n  --flag && git commit -qam x',
+    'npm test &&\n  git push',
+    '# comment\n\ngit push',
+    'cd repo\ngit status\ngit log -1',
+  ])
+    expect(needsErrexit(c)).toBe(false)
+  expect(topLevelLines("a <<'X' && b <<Y\nx body\nX\ny body\nY\nc")).toBe(2)
+  expect(topLevelLines('cat <<< "here string"\ngit push')).toBe(2)
 })

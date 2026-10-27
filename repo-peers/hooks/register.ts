@@ -6,12 +6,16 @@
 // session reads its peers' files, and when the set of peers working in this
 // repo changes, or a peer has edited a file this chat edited too, Claude gets
 // a hidden note naming them and suggesting it message a peer whose work could
-// collide. Windows only: the folder comes from %TEMP% via cmd.
+// collide. During a turn, tool calls also check (at most once a minute) for a
+// peer that went from idle to working, so a chat that starts mid-task is named
+// then, not at the next prompt. Windows only: the folder comes from %TEMP% via cmd.
 import type { Register, EngineInterface } from 'claude-code'
 
 export const ACTIVE_MS = 30 * 60_000 // a peer idle longer than this is left out
 const MAX_FILES = 15
 const BEAT_MS = 2 * 60_000
+const CHECK_MS = 60_000 // how often a turn's tool calls look for peers that started
+const RENAME_MS = 15 * 60_000 // a peer named as working within this isn't named again for starting
 
 export type Beat = {
   id: string
@@ -26,7 +30,9 @@ export type Beat = {
   ended: boolean
 }
 
-type Me = { beat: Beat; told: string }
+// told: the last prompt note's signature; working: peers seen working at the
+// last check; named: when each peer was last named to Claude as working.
+type Me = { beat: Beat; told: string; working: Set<string>; checked: number; named: Map<string, number> }
 let me: Me | null = null
 let dir: Promise<string | undefined> | undefined
 
@@ -80,12 +86,15 @@ export async function readPeers($: EngineInterface, self: Beat, now: number): Pr
 
 const ago = (ms: number) => (ms < 90_000 ? 'just now' : `${Math.round(ms / 60_000)} min ago`)
 
-export function peerNote(self: Beat, peers: Beat[], now: number): { text: string | null; sig: string } {
+const HEAD = 'repo-peers: other Claude chats are working in this repo:'
+export const STARTED_HEAD = 'repo-peers: while this turn ran, another Claude chat started working in this repo:'
+
+export function peerNote(self: Beat, peers: Beat[], now: number, head = HEAD): { text: string | null; sig: string } {
   const mine = new Set(self.files)
   const rows = peers.map(p => ({ p, shared: p.files.filter(f => mine.has(f)) }))
   const sig = rows.map(r => `${r.p.id}:${r.p.checkout === self.checkout ? 'same' : 'other'}:${r.shared.join(',')}`).join('|')
   if (!rows.length) return { text: null, sig }
-  const lines = ['repo-peers: other Claude chats are working in this repo:']
+  const lines = [head]
   for (const { p, shared } of rows) {
     const where = p.checkout === self.checkout ? `same checkout (${p.branch})` : `worktree ${p.checkout} (${p.branch})`
     const name = p.title ? `"${p.title}"` : `chat starting "${p.firstPrompt}"`
@@ -107,6 +116,16 @@ function editedPath(tool: string, input: unknown): string | null {
   return typeof p === 'string' ? p : null
 }
 
+// Peers working now that weren't at the last check and haven't been named
+// recently. Updates the check state either way.
+function started(peers: Beat[], now: number): Beat[] {
+  if (!me) return []
+  const fresh = peers.filter(p => p.working && !me!.working.has(p.id) && now - (me!.named.get(p.id) ?? -Infinity) >= RENAME_MS)
+  me.working = new Set(peers.filter(p => p.working).map(p => p.id))
+  me.checked = now
+  return fresh
+}
+
 export const register: Register = on => {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const r = await next(e)
@@ -116,13 +135,16 @@ export const register: Register = on => {
       const g = await gitInfo($, e.cwd)
       if (!g) return r
       const beat: Beat = { id: e.session_id, ...g, title: '', firstPrompt: e.prompt.replace(/\s+/g, ' ').slice(0, 80), files: [], working: true, updated: now, ended: false }
-      me = { beat, told: '' }
+      me = { beat, told: '', working: new Set(), checked: 0, named: new Map() }
     }
     me.beat = { ...me.beat, title: e.session_title ?? me.beat.title, working: true, updated: now }
     await save($)
-    const { text, sig } = peerNote(me.beat, await readPeers($, me.beat, now), now)
-    if (sig === me.told) return r
+    const peers = await readPeers($, me.beat, now)
+    const fresh = started(peers, now)
+    const { text, sig } = peerNote(me.beat, peers, now)
+    if (sig === me.told && !fresh.length) return r
     me.told = sig
+    for (const p of peers) if (p.working) me.named.set(p.id, now)
     return text ? { ...r, additionalContext: [...(r.additionalContext ?? []), text] } : r
   }).catch(($, e, next) => next(e))
 
@@ -133,11 +155,17 @@ export const register: Register = on => {
     if (!me) return r
     const now = await $.clock.now()
     const path = editedPath(e.tool_name, e.tool_input)
-    if (!path && now - me.beat.updated < BEAT_MS) return r
-    const files = path ? [...me.beat.files.filter(f => f !== rel(path)), rel(path)].slice(-MAX_FILES) : me.beat.files
-    me.beat = { ...me.beat, files, updated: now }
-    await save($)
-    return r
+    if (path || now - me.beat.updated >= BEAT_MS) {
+      const files = path ? [...me.beat.files.filter(f => f !== rel(path)), rel(path)].slice(-MAX_FILES) : me.beat.files
+      me.beat = { ...me.beat, files, updated: now }
+      await save($)
+    }
+    if (now - me.checked < CHECK_MS) return r
+    const fresh = started(await readPeers($, me.beat, now), now)
+    if (!fresh.length) return r
+    for (const p of fresh) me.named.set(p.id, now)
+    const { text } = peerNote(me.beat, fresh, now, STARTED_HEAD)
+    return text ? { ...r, additionalContext: [...(r.additionalContext ?? []), text] } : r
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {

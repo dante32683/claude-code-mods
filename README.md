@@ -35,7 +35,7 @@ Better compaction. Before each compaction it saves the whole conversation to a s
 
 ### repo-peers
 
-Tells Claude when other Claude chats are working in the same repo (same checkout or another worktree) and which files they've edited, so it can coordinate before work collides. Windows only for now.
+Tells Claude when other Claude chats are working in the same repo (same checkout or another worktree) and which files they've edited, so it can coordinate before work collides. A chat that starts working while yours is mid-task is named right away, not at your next message. Windows only for now.
 
 ### aside
 
@@ -43,7 +43,7 @@ Tells Claude when other Claude chats are working in the same repo (same checkout
 
 ### bash-fixes
 
-Windows Git Bash only. It fixes a few ways Claude's Bash tool breaks there: very long commands get cut off or mangled, `rg` patterns starting with `/` get turned into Windows paths, `sed -i` doesn't say when nothing changed, and `rm "${DIR:?}"/...` keeps asking for approval.
+Windows Git Bash only. It fixes a few ways Claude's Bash tool breaks there: very long commands get cut off or mangled, `rg` patterns starting with `/` get turned into Windows paths, `sed -i` doesn't say when nothing changed, and `rm "${DIR:?}"/...` keeps asking for approval. It also stops a `git commit` from running after a failed check or edit earlier in the same command (pipefail where a pipe gates the rest, and `bash -e` for multi-line commands, since the tool's own shell ignores `set -e`). It adds an `edits` command for exact-text edits from a heredoc: nothing is written unless every edit matches, and each file keeps its line endings.
 
 ## Development
 

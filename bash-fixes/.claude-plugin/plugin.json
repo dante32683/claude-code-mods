@@ -1,7 +1,7 @@
 {
   "name": "bash-fixes",
-  "version": "0.4.0",
-  "description": "Fixes for Claude's Bash tool on Windows Git Bash: long commands run from a temp script, rg keeps patterns that start with /, a sed -i that changes nothing fails, rm targets that start with a variable get a ${VAR:?} guard, and a double-quoted pwsh -Command body with $ is refused.",
+  "version": "0.5.0",
+  "description": "Fixes for Claude's Bash tool on Windows Git Bash: long commands run from a temp script, rg keeps patterns that start with /, a no-op sed -i fails, rm targets that start with a variable get the ${VAR:?} guard so the empty-variable check doesn't ask (an rm ask the guard can't clear is refused with what to write), a double-quoted pwsh -Command body with $ is refused, pipefail and errexit stop a git write after a failed step, and `edits` makes all-or-nothing text edits that keep line endings.",
   "author": {
     "name": "dante32683"
   }

@@ -359,6 +359,12 @@ export function crabSvg(activity: Activity): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges">${groups.join('')}</svg>`
 }
 
+// The loop's first frame alone, with no SMIL: drawn as a plain (image) Svg, which shows
+// at once, while the animated pose's frame loads.
+export function crabStill(activity: Activity): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges"><g>${drawFrame(LOOPS[activity][0]!)}</g></svg>`
+}
+
 // The terminal has no Svg: a small glyph crab instead, its legs stepping by frame.
 export function crabGlyph(activity: Activity, frame: number): string {
   if (activity === 'failed') return '▐▀█▀▌'

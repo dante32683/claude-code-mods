@@ -93,9 +93,9 @@ test('the pane draws usage and the context breakdown in both apps', async ($, on
     expect(bars.length).toBe(surface === 'desktop' ? 3 : 0)
     if (surface === 'desktop') {
       // Messages is the largest used category, so it takes the app's first colour.
-      expect(bars[2]?.props.source).toContain('fill="#3987e5"')
+      expect(bars[2]?.props.source).toContain('fill="#338ced"')
       const first = (await ui.findAll({ type: 'Text', text: /^■ $/ }))[0]
-      expect(first?.props.color).toBe('#3987e5')
+      expect(first?.props.color).toBe('#338ced')
     }
     expect(await ui.find({ key: 'exact' })).toBeDefined()
     // Open the memory-file list, check it, and close it again for the next app.

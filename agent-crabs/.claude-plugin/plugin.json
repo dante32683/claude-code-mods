@@ -1,6 +1,6 @@
 {
   "name": "agent-crabs",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Above the prompt, one animated pixel Clawd per running subagent, acting out what it is doing now.",
   "author": {
     "name": "dante32683"

@@ -46,3 +46,9 @@ sed() {
   echo "sed: the script matched nothing; no change in ${files[*]}" >&2
   return 1
 }
+
+# edits: exact-text edits from a quoted heredoc, all or nothing, keeping each
+# file's line endings. Usage and format: bin/edits.py (edits --help).
+edits() {
+  python "$(dirname -- "${BASH_SOURCE[0]}")/../bin/edits.py" "$@"
+}

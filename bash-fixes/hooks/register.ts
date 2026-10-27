@@ -7,12 +7,17 @@
 // tool.call:  source hooks/guards.sh first (rg keeps patterns that start
 //             with /, a no-op `sed -i` fails), add the :? guard to rm targets
 //             that start with a variable so an empty variable stops the
-//             command instead of deleting from /, then run a command the Windows
-//             command line would cut off or corrupt from a self-deleting
-//             temp script.
+//             command instead of deleting from /, turn on pipefail where a
+//             pipeline's status gates the rest (a chain or a git write),
+//             run a command the Windows command line would cut off or
+//             corrupt from a self-deleting temp script, and one where a git
+//             write follows other top-level lines from a script run by a
+//             child `bash -e`, so a failed edit or check stops a later
+//             commit (the tool's own shell ignores set -e). guards.sh also
+//             defines `edits` (bin/edits.py), all-or-nothing text edits.
 import type { Register, EngineInterface } from 'claude-code'
-import { needsOffload, scriptText, sourceCommand } from './plan'
-import { guardRmTargets, hasExpandedPwshDollar, rmAskAdvice, withGuards } from './guards'
+import { errexitCommand, needsOffload, scriptText, sourceCommand } from './plan'
+import { guardRmTargets, hasExpandedPwshDollar, needsErrexit, rmAskAdvice, withGuards, withPipefail } from './guards'
 
 let tempDir: Promise<string | undefined> | undefined
 
@@ -46,14 +51,16 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const command = withGuards(guardRmTargets(e.command), $.plugin.root)
-    if (!needsOffload(command)) return next({ ...e, command })
+    const base = withPipefail(guardRmTargets(e.command))
+    const errexit = needsErrexit(base)
+    const command = withGuards(base, $.plugin.root)
+    if (!errexit && !needsOffload(command)) return next({ ...e, command })
     const dir = await findTempDir($)
     if (dir === undefined) return next({ ...e, command })
 
     const path = `${dir}/claude-long-bash-${crypto.randomUUID()}.sh`
     await $.fs.write(path, scriptText(command))
-    const ran = await next({ ...e, command: sourceCommand(path) })
+    const ran = await next({ ...e, command: errexit ? errexitCommand(path) : sourceCommand(path) })
 
     // The script deletes itself; this catches a parse error on its first line.
     if (!e.run_in_background && (await $.fs.exists(path))) {

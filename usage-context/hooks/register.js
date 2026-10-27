@@ -30,12 +30,12 @@ const HIDDEN_KEY = 'paneHidden'
 // Segment colours for the context bar; free space and the buffer are dim blocks.
 const PALETTE = ['cyan', 'magenta', 'yellow', 'green', 'blue', 'red', 'white']
 const LIST_MAX = 8
-// The Desktop app's own context colours (sampled from its Context panel): the
-// four largest used categories in these, the rest grey, the autocompact buffer
-// darker, free space the bare track. Plan bars use the first, or amber and red
-// as they near the limit.
-const APP = { ranked: ['#3987e5', '#d95926', '#199e70', '#c98500'], other: '#97958d', buffer: '#5f5e5a', track: '#292827' }
-const APP_LEVEL = { success: '#3987e5', warning: '#c98500', error: '#d95926' }
+// The Desktop app's own context colours (sampled from its Context panel, app
+// 3.6556): the four largest used categories in these, the rest grey, the
+// autocompact buffer darker, free space the bare track. Plan bars use the
+// first, or the app's amber and danger red as they near the limit.
+const APP = { ranked: ['#338ced', '#e76624', '#00a888', '#d28e05'], other: '#959595', buffer: '#5e5e5e', track: '#2b2b2b' }
+const APP_LEVEL = { success: '#338ced', warning: '#d28e05', error: '#dc3c3d' }
 
 // Latest plan readings: { kind, percent, resetsAtMs, isCached }, in ORDER.
 let readings = []
@@ -139,10 +139,10 @@ function figures(reading, saved, now) {
 }
 
 // Theme colours, so the pane follows the user's theme: fine while the pace
-// ends under 80%, a warning under 100%, an error when it fills early.
+// ends under 90%, a warning under 100%, an error when it fills early.
 function colorOf(percent, f) {
   if (f.willFill || percent >= 90) return 'error'
-  if (f.projected >= 80) return 'warning'
+  if (f.projected >= 90) return 'warning'
   return 'success'
 }
 
@@ -202,7 +202,7 @@ function usageRows(els, columns, isDesktop) {
       children: [
         Text({ weight: 'semibold', dimColor: dim, children: f.w.label + ' ' }),
         ...(isDesktop && els.Svg
-          ? [els.Svg({ source: svgMeter(r.percent, dim ? APP.other : APP_LEVEL[color]), alt: f.w.label + ' ' + Math.round(r.percent) + '%', width: 120, height: 6 })]
+          ? [els.Svg({ source: svgMeter(r.percent, dim ? APP.other : APP_LEVEL[color]), alt: f.w.label + ' ' + Math.round(r.percent) + '%', width: 120, height: 5 })]
           : [Text({ color, dimColor: dim, children: '█'.repeat(filled) }), Text({ dimColor: true, children: '░'.repeat(barWidth - filled) })]),
         Text({ weight: dim ? undefined : 'semibold', dimColor: dim, tabular: true, children: ' ' + (Math.round(r.percent) + '%').padStart(4) }),
       ],
@@ -234,9 +234,9 @@ function usageRows(els, columns, isDesktop) {
 function svgMeter(percent, fill) {
   const w = Math.max(0, Math.min(100, percent)) * 10
   return (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 6" width="1000" height="6" preserveAspectRatio="none">' +
-    '<clipPath id="m"><rect width="1000" height="6" rx="3"/></clipPath><g clip-path="url(#m)">' +
-    '<rect width="1000" height="6" fill="' + APP.track + '"/><rect width="' + w + '" height="6" fill="' + fill + '"/></g></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 5" width="1000" height="5" preserveAspectRatio="none">' +
+    '<clipPath id="m"><rect width="1000" height="5" rx="2.5"/></clipPath><g clip-path="url(#m)">' +
+    '<rect width="1000" height="5" fill="' + APP.track + '"/><rect width="' + w + '" height="5" fill="' + fill + '"/></g></svg>'
   )
 }
 
@@ -246,14 +246,14 @@ function svgBar(segments) {
   const widths = apportion(segments.map((s) => s.c.tokens), 1000)
   let x = 0
   const rects = segments.map((s, i) => {
-    const rect = s.c.kind === 'free' ? '' : '<rect x="' + x + '" width="' + Math.max(0, widths[i] - 3) + '" height="6" fill="' + s.hex + '"/>'
+    const rect = s.c.kind === 'free' ? '' : '<rect x="' + x + '" width="' + Math.max(0, widths[i] - 3) + '" height="5" fill="' + s.hex + '"/>'
     x += widths[i]
     return rect
   })
   return (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 6" width="1000" height="6" preserveAspectRatio="none">' +
-    '<clipPath id="r"><rect width="1000" height="6" rx="3"/></clipPath><g clip-path="url(#r)">' +
-    '<rect width="1000" height="6" fill="' + APP.track + '"/>' + rects.join('') + '</g></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 5" width="1000" height="5" preserveAspectRatio="none">' +
+    '<clipPath id="r"><rect width="1000" height="5" rx="2.5"/></clipPath><g clip-path="url(#r)">' +
+    '<rect width="1000" height="5" fill="' + APP.track + '"/>' + rects.join('') + '</g></svg>'
   )
 }
 
@@ -307,7 +307,7 @@ function contextBlocks(els, columns, redraw, actions, isDesktop) {
   // that fills the pane instead.
   summary.push(
     isDesktop && els.Svg
-      ? Box({ marginBottom: 1, children: [els.Svg({ source: svgBar(segments), alt: 'Context ' + Math.round(pct) + '% used', height: 6 })] })
+      ? Box({ marginBottom: 1, children: [els.Svg({ source: svgBar(segments), alt: 'Context ' + Math.round(pct) + '% used', height: 5 })] })
       : Box({
           flexDirection: 'row',
           marginBottom: 1,

@@ -110,3 +110,56 @@ test('any tool call refreshes the heartbeat, at most every 2 minutes', async ($,
   await bash()
   expect(JSON.parse(files.get(`${DIR}/me1.json`)!).updated).toBe(NOW + 3 * MIN)
 })
+
+const bashCall = ($: any) => $.classic.PostToolUse({ session_id: 'me1', cwd: 'C:\\Users\\x\\Project', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {}, tool_use_id: 't' })
+
+test('a peer that starts working mid-turn is named on the next tool call after a minute', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files = new Map([[`${DIR}/peer1.json`, peer({ working: false, updated: NOW - MIN })]])
+  stubs(on, files)
+  const r1: any = await prompt($)
+  expect(r1.additionalContext[0]).toContain('idle since just now')
+  // The peer starts a turn; checks within a minute of the last one don't look.
+  await clock.advance(30_000)
+  files.set(`${DIR}/peer1.json`, peer({ working: true, updated: NOW + 30_000 }))
+  const early: any = await bashCall($)
+  expect(early.additionalContext).toBeUndefined()
+  await clock.advance(MIN)
+  const r2: any = await bashCall($)
+  expect(r2.additionalContext[0]).toContain('while this turn ran, another Claude chat started working')
+  expect(r2.additionalContext[0]).toContain('"MCP result fixes": same checkout (main), working now')
+  // Still working: not named again.
+  await clock.advance(2 * MIN)
+  const r3: any = await bashCall($)
+  expect(r3.additionalContext).toBeUndefined()
+})
+
+test('a peer that keeps starting turns is named for starting at most every 15 minutes', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files = new Map([[`${DIR}/peer1.json`, peer()]])
+  stubs(on, files)
+  const r1: any = await prompt($) // named as working
+  expect(r1.additionalContext[0]).toContain('working now')
+  const flip = async (working: boolean) => {
+    await clock.advance(2 * MIN)
+    files.set(`${DIR}/peer1.json`, peer({ working, updated: NOW }))
+    return (await bashCall($)) as any
+  }
+  await flip(false)
+  expect((await flip(true)).additionalContext).toBeUndefined() // 4 min after being named
+  await clock.advance(12 * MIN)
+  await flip(false)
+  expect((await flip(true)).additionalContext[0]).toContain('started working')
+})
+
+test('a peer that started while this chat was idle is named at the next prompt', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files = new Map([[`${DIR}/peer1.json`, peer({ working: false, updated: NOW - MIN })]])
+  stubs(on, files)
+  await prompt($)
+  await $.classic.Stop({ session_id: 'me1', cwd: 'C:\\Users\\x\\Project', stop_hook_active: false })
+  await clock.advance(5 * MIN)
+  files.set(`${DIR}/peer1.json`, peer({ working: true, updated: NOW + 5 * MIN }))
+  const r: any = await prompt($)
+  expect(r.additionalContext[0]).toContain('"MCP result fixes": same checkout (main), working now')
+})
