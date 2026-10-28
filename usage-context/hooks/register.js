@@ -12,6 +12,14 @@
 //
 // When there is no live reading yet (or a response carried no rate-limit
 // headers), it shows the last one saved in statusline-limits.json, dimmed.
+//
+// turn.step: log each response's tokens (input, output, cache reads and
+//   writes) per hour and model; session.measure adds the API-priced cost. A
+//   Stats button at the right end of the band's first row opens the side pane,
+//   which shows the stats and the context breakdown as the extra view.
+//   Layout and estimates: stats.js.
+
+import * as st from './stats.js'
 
 const PANE = 'usage-context'
 const HOUR = 3_600_000
@@ -51,10 +59,23 @@ let isRefreshing = false
 // Which detail lists the pane has open.
 const open = { files: false, mcp: false, agents: false, skills: false }
 let isPaneOpen = false
-// True once the surface has drawn the pane; the band above the prompt then stays out.
+// True once the surface has drawn the pane.
 let isPanePlaced = false
 // The 30-second redraw, so a second session.start doesn't stack another.
 let timer = null
+// Whether the stats view shows the day list.
+let isDaysOpen = false
+
+// Token log: this session's record, the merged hours and other sessions'
+// hours of this account, and the finished 5-hour windows.
+let sessionId = null
+let mine = { last: 0, usdSeen: 0, h: {} }
+let merged = {}
+const others = new Map()
+let records = []
+let lastFlushMs = 0
+let isDirty = false
+let ticks = 0
 
 // ---- pure helpers ----
 
@@ -162,6 +183,22 @@ function apportion(weights, width) {
     left++
   }
   return cells
+}
+
+// Dollars: cents under 10, one decimal under 100.
+function usd(n) {
+  return '$' + (n < 10 ? n.toFixed(2) : n < 100 ? n.toFixed(1) : String(Math.round(n)))
+}
+
+// The account's label: its CLAUDE_CONFIG_DIR folder name, none for the default.
+function accountName() {
+  return account === 'main' ? '' : account
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+function dayLabel(ms) {
+  const d = new Date(ms)
+  return WEEKDAYS[d.getDay()] + ' ' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
 }
 
 // ---- drawing (take the element table, never `$`) ----
@@ -414,6 +451,121 @@ function contextBlocks(els, columns, redraw, actions, isDesktop) {
   return blocks
 }
 
+// Every hour map of this account: merged, other sessions', this one's.
+function allHours() {
+  return [merged, ...others.values(), mine.h]
+}
+
+// The figures the stats view shows, recomputed at most every 30 seconds.
+let statsCache = null
+function computeStats() {
+  if (statsCache && nowMs - statsCache.at < 30_000) return statsCache.stats
+  const maps = allHours()
+  const five = readings.find((r) => r.kind === 'five_hour')
+  const week = readings.find((r) => r.kind === 'seven_day')
+  const ranges = [
+    ['This 5h', five ? five.resetsAtMs - WINDOWS.five_hour.length : nowMs - 5 * HOUR],
+    ['Today', st.localDayStart(nowMs)],
+    ['This week', week ? week.resetsAtMs - WINDOWS.seven_day.length : nowMs - 7 * st.DAY],
+    ['30 days', nowMs - 30 * st.DAY],
+  ].map(([label, from]) => ({ label, totals: st.sumRange(maps, from, nowMs, nowMs) }))
+  const days = st.dailyTotals(maps, nowMs, 30, st.localDayStart)
+  const active = days.filter((d) => st.totalTokens(d.totals) > 0)
+  const weekTotals = ranges[2].totals
+  // The window open now, so far: how far each figure moved since its first sample.
+  const current = five ? st.windowRecord(Math.round(five.resetsAtMs / HOUR), samples.get(windowId('five_hour', five.resetsAtMs)) ?? [], weeksOf()) : null
+  const stats = {
+    ranges,
+    days: days.slice(0, 7),
+    activeDay: active.length > 0 ? { tokens: active.reduce((a, d) => a + st.totalTokens(d.totals), 0) / active.length, usd: active.reduce((a, d) => a + d.totals.usd, 0) / active.length, days: active.length } : null,
+    share: st.weeklyShare(records),
+    current,
+    perPoint: st.perPoint(records),
+    perWeekPoint: week && week.percent >= 3 && st.totalTokens(weekTotals) > 0 ? { tokens: st.totalTokens(weekTotals) / week.percent, usd: weekTotals.usd / week.percent } : null,
+    averageEnd: st.averageEnd(records, nowMs),
+    models: Object.entries(weekTotals.models).sort((a, b) => b[1] - a[1]),
+  }
+  statsCache = { at: nowMs, stats }
+  return stats
+}
+
+// The weekly windows' samples of this account, for windowRecord.
+function weeksOf() {
+  const prefix = KEY_PREFIX + account + ':seven_day:'
+  const weeks = []
+  for (const [key, list] of samples) {
+    if (key.startsWith(prefix)) weeks.push({ resetsAtMs: Number(key.slice(prefix.length)) * HOUR, list })
+  }
+  return weeks
+}
+
+// The stats view: token use by range, the weekly share of a 5-hour window,
+// what one point of each limit buys, averages, models, and the last days.
+function statsBlocks(els, columns, actions) {
+  const { Box, Text, Button } = els
+  const s = computeStats()
+  const width = Math.max(30, Math.min(columns - 2, 72))
+  const line = (children, props = {}) => Text({ dimColor: true, wrap: 'truncate', tabular: true, ...props, children })
+  const rows = [spread(Box, heading(Text, 'Usage stats'), Text({ dimColor: true, children: [planName, accountName()].filter(Boolean).join(' · ') }))]
+
+  for (const { label, totals } of s.ranges) {
+    const all = st.totalTokens(totals)
+    rows.push(
+      spread(
+        Box,
+        Text({ weight: 'semibold', children: label }),
+        Text({ tabular: true, children: all > 0 ? short(all) + ' tokens  ' + usd(totals.usd) : 'nothing logged yet' }),
+      ),
+    )
+    if (all > 0) {
+      rows.push(
+        Box({
+          paddingLeft: 2,
+          children: [
+            line('in ' + short(totals.input) + ' · out ' + short(totals.output) + ' · cache read ' + short(totals.cacheRead) + ' · write ' + short(totals.cacheWrite) + ' · ' + Math.round(totals.requests) + ' calls'),
+          ],
+        }),
+      )
+    }
+  }
+
+  const facts = []
+  if (s.share) {
+    facts.push(
+      'One 5h window ≈ ' + rate(s.share.percent) + '% of the week, about ' + rate(100 / Math.max(0.1, s.share.percent)) + ' windows a week (' + s.share.windows + ' windows)',
+    )
+  } else {
+    facts.push('One 5h window ≈ ?% of the week: needs a few windows that moved ' + st.MIN_SHARE_POINTS + '+ points')
+  }
+  if (s.current && s.current.d5 > 0) facts.push('This window so far: 5h +' + Math.round(s.current.d5) + ', week +' + Math.round(s.current.dw))
+  if (s.perPoint) facts.push('1% of 5h ≈ ' + usd(s.perPoint.usd) + ' · ' + short(s.perPoint.tokens) + ' tokens (' + s.perPoint.windows + ' windows)')
+  if (s.perWeekPoint) facts.push('1% of the week ≈ ' + usd(s.perWeekPoint.usd) + ' · ' + short(s.perWeekPoint.tokens) + ' tokens (this week)')
+  if (s.averageEnd) facts.push('5h windows end near ' + Math.round(s.averageEnd.percent) + '% on average (' + s.averageEnd.windows + ' in 30 days)')
+  if (s.activeDay) facts.push('Active day ≈ ' + usd(s.activeDay.usd) + ' · ' + short(s.activeDay.tokens) + ' tokens (' + s.activeDay.days + ' days)')
+  const modelTotal = s.models.reduce((a, [, n]) => a + n, 0)
+  if (modelTotal > 0) {
+    facts.push('Models this week: ' + s.models.slice(0, 3).map(([name, n]) => name + ' ' + Math.round((100 * n) / modelTotal) + '%').join(' · '))
+  }
+  const factRows = facts.map((f) => line(f, { dimColor: false }))
+
+  const dayRows = [
+    Button({ key: 'toggle-days', label: (isDaysOpen ? '▾ ' : '▸ ') + 'Last 7 days', hotkey: 'd', plain: true, dimColor: true, onPress: actions.toggleDays }),
+  ]
+  if (isDaysOpen) {
+    for (const d of s.days) {
+      const all = st.totalTokens(d.totals)
+      dayRows.push(
+        spread(Box, line(dayLabel(d.start)), line(all > 0 ? short(all).padStart(6) + '  ' + usd(d.totals.usd).padStart(6) : '—'), { paddingLeft: 2 }),
+      )
+    }
+  }
+
+  const footer = [line('Claude Code only (this mod logs it); chat and phone use count toward the limits too.')]
+
+  const column = (children, props = {}) => Box({ flexDirection: 'column', width, ...props, children })
+  return [column(rows), column(factRows), column(dayRows), column(footer)]
+}
+
 // ---- hooks ----
 
 export function register(on) {
@@ -422,13 +574,27 @@ export function register(on) {
     nowMs = await $.clock.now()
     const dir = await $.env.get('CLAUDE_CONFIG_DIR')
     if (dir) account = String(dir).split(/[\\/]/).filter(Boolean).pop() || 'main'
+    try {
+      sessionId = await $.session.id()
+    } catch {
+      sessionId = null
+    }
+    await loadTokens($)
     await loadSamples($)
+    await harvest($)
+    await pruneSamples($)
     await readPlan($)
     await takeReading($)
     await takeContext($, 'summary')
     timer?.cancel?.()
     timer = $.clock.every(30_000, async () => {
       nowMs = await $.clock.now()
+      // Every five minutes: save this session's hours, and read other sessions'.
+      if (++ticks % 10 === 0) {
+        await flushTokens($, true)
+        await loadOthers($)
+        await harvest($)
+      }
       $.ui.invalidate('ui.render')
     })
     // Open the pane unless the user closed it themselves last time. In a narrow
@@ -469,7 +635,32 @@ export function register(on) {
     const result = await next(e)
     nowMs = await $.clock.now()
     if (e.changed.includes('rateLimits')) await accept($, e.rateLimits)
+    if (e.cost && e.changed.includes('cost')) {
+      // The session's running total: add what it grew by. A total under the
+      // last one seen is a new count (a restarted process), so all of it is new.
+      const delta = e.cost.usd >= mine.usdSeen ? e.cost.usd - mine.usdSeen : e.cost.usd
+      mine.usdSeen = e.cost.usd
+      st.addCost(mine.h, nowMs, delta)
+      isDirty = true
+    }
     return result
+  })
+
+  // Every model request of the session, main loop and subagents alike: log what
+  // the response used. The stream passes through untouched.
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+    try {
+      if (response && response.usage) {
+        nowMs = await $.clock.now()
+        st.addUsage(mine.h, nowMs, response.usage.model || e.model, response.usage)
+        isDirty = true
+        await flushTokens($, false)
+      }
+    } catch {
+      // Logging is best effort; the response already went through.
+    }
+    return response
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -477,8 +668,14 @@ export function register(on) {
     if (!e.agentId) {
       await takeReading($)
       await takeContext($, 'summary')
+      await flushTokens($, true)
     }
     return result
+  })
+
+  on('session.end', async ($, e, next) => {
+    await flushTokens($, true)
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
@@ -488,7 +685,7 @@ export function register(on) {
     const { Box, Text } = els
     const columns = e.props.bodyColumns ?? 40
     const redraw = () => $.ui.invalidate('ui.render')
-    const actions = { exact: () => takeContext($, 'full') }
+    const actions = { exact: () => takeContext($, 'full'), ...statsActions($) }
     const usage = Box({
       flexDirection: 'column',
       children: [
@@ -496,18 +693,19 @@ export function register(on) {
         ...usageRows(els, columns, e.surface !== 'terminal'),
       ],
     })
+    // The pane is the extra view: the stats always open, then the context breakdown.
     return Box({
       flexDirection: 'column',
       paddingX: 1,
       rowGap: 1,
-      children: [usage, ...contextBlocks(els, columns, redraw, actions, e.surface !== 'terminal')],
+      children: [usage, ...statsBlocks(els, columns, actions), ...contextBlocks(els, columns, redraw, actions, e.surface !== 'terminal')],
     })
   })
 
-  // The usage rows above the prompt, as a fallback while the pane isn't drawn
-  // (a narrow terminal, or the pane closed).
+  // The usage rows above the prompt, with a Stats button at the right end of
+  // the first row that opens the side pane. Drawn whether or not the pane is open.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || isPanePlaced) return next(e)
+    if (e.props.hasSurvey) return next(e)
     const theirs = await next(e)
     // Another plugin's band (a form, say) gets the band to itself: the band is
     // one scrolling region, so sharing it buries one under the other. The
@@ -516,9 +714,33 @@ export function register(on) {
     const isCrabs = theirs && theirs.part && theirs.part.plugin === 'agent-crabs'
     if (theirs && theirs.type !== 'engine' && !isCrabs) return theirs
     const els = $.ui.resolve(e)
-    const mine = els.Box({ flexDirection: 'column', paddingX: 1, children: usageRows(els, e.props.bodyColumns ?? 80, e.surface !== 'terminal') })
-    return theirs ? els.Box({ flexDirection: 'column', children: [theirs, mine] }) : mine
+    const columns = e.props.bodyColumns ?? 80
+    const stats = els.Button({ key: 'stats', label: 'Stats', hotkey: 'u', plain: true, dimColor: true, onPress: statsActions($).showStats })
+    const rows = usageRows(els, columns, e.surface !== 'terminal')
+    rows[0] = spread(els.Box, rows[0], stats, { alignItems: 'flex-start' })
+    const band = els.Box({ flexDirection: 'column', paddingX: 1, children: rows })
+    return theirs ? els.Box({ flexDirection: 'column', children: [theirs, band] }) : band
   })
+}
+
+// What the stats view's buttons do.
+function statsActions($) {
+  const redraw = () => $.ui.invalidate('ui.render')
+  return {
+    // Open the side pane (stats first) with fresh figures. A one-off: it leaves
+    // the pane's closed-by-the-user setting alone.
+    showStats: async () => {
+      statsCache = null
+      nowMs = await $.clock.now()
+      await loadOthers($)
+      await openPane($)
+      redraw()
+    },
+    toggleDays: () => {
+      isDaysOpen = !isDaysOpen
+      redraw()
+    },
+  }
 }
 
 async function openPane($) {
@@ -657,18 +879,141 @@ async function save($, r) {
   samples.set(id, list)
 }
 
-// Load the samples saved for the windows now open, and drop the old windows'.
+// Load every window's saved samples; pruneSamples drops the old ones after
+// harvest has read them.
 async function loadSamples($) {
   const keys = await $.store.keys()
-  const keep = Math.round((nowMs - 8 * 24 * HOUR) / HOUR)
   for (const key of keys) {
     if (!key.startsWith(KEY_PREFIX)) continue
-    const hourOfReset = Number(key.slice(key.lastIndexOf(':') + 1))
-    if (hourOfReset < keep) {
-      await $.store.delete(key)
-      continue
-    }
     const stored = await $.store.get(key)
     if (Array.isArray(stored)) samples.set(key, stored)
+  }
+}
+
+// Drop the samples of windows that reset over 8 days ago.
+async function pruneSamples($) {
+  const keep = Math.round((nowMs - 8 * 24 * HOUR) / HOUR)
+  for (const key of [...samples.keys()]) {
+    const hourOfReset = Number(key.slice(key.lastIndexOf(':') + 1))
+    if (hourOfReset >= keep) continue
+    samples.delete(key)
+    await $.store.delete(key)
+  }
+}
+
+// ---- token log (layout in stats.js) ----
+
+const tokKey = (sid) => st.TOK_PREFIX + account + ':' + sid
+
+// Load this session's record (a hot reload or a resume continues it), merge
+// the hours of this account's sessions that went quiet, and read the rest.
+async function loadTokens($) {
+  try {
+    if (sessionId) {
+      const stored = await $.store.get(tokKey(sessionId))
+      if (stored && typeof stored === 'object' && stored.h) mine = { last: stored.last || 0, usdSeen: stored.usdSeen || 0, h: stored.h }
+    }
+    await mergeQuiet($)
+    await loadOthers($)
+    const saved = await $.store.get(st.WIN_PREFIX + account)
+    records = Array.isArray(saved) ? saved : []
+  } catch {
+    // The stats start empty; usage and context still draw.
+  }
+}
+
+// Fold the hours of sessions quiet for MERGE_AFTER_MS into toks:<account> and
+// delete their keys. A marker keeps two sessions starting together from
+// merging the same keys twice; a stale marker (a crashed merge) is ignored.
+async function mergeQuiet($) {
+  const prefix = st.TOK_PREFIX + account + ':'
+  const keys = (await $.store.keys()).filter((k) => k.startsWith(prefix) && k !== tokKey(sessionId))
+  const quiet = []
+  for (const key of keys) {
+    const rec = await $.store.get(key)
+    if (!rec || typeof rec !== 'object' || nowMs - (rec.last || 0) >= st.MERGE_AFTER_MS) quiet.push([key, rec])
+  }
+  const savedMerged = await $.store.get(st.MERGED_PREFIX + account)
+  merged = savedMerged && typeof savedMerged === 'object' ? savedMerged : {}
+  if (quiet.length === 0) return
+  const marker = await $.store.get(st.MERGE_KEY)
+  if (marker && marker.by !== sessionId && nowMs - (marker.at || 0) < 60_000) return
+  await $.store.set(st.MERGE_KEY, { by: sessionId, at: nowMs })
+  const check = await $.store.get(st.MERGE_KEY)
+  if (!check || check.by !== sessionId) return
+  const fresh = await $.store.get(st.MERGED_PREFIX + account)
+  merged = fresh && typeof fresh === 'object' ? fresh : {}
+  for (const [, rec] of quiet) if (rec && rec.h) st.mergeHours(merged, rec.h)
+  st.pruneHours(merged, nowMs - st.KEEP_HOURS_MS)
+  await $.store.set(st.MERGED_PREFIX + account, merged)
+  for (const [key] of quiet) await $.store.delete(key)
+  await $.store.delete(st.MERGE_KEY)
+}
+
+// Read the hours other sessions of this account have saved.
+async function loadOthers($) {
+  try {
+    const prefix = st.TOK_PREFIX + account + ':'
+    const keys = (await $.store.keys()).filter((k) => k.startsWith(prefix) && k !== tokKey(sessionId))
+    others.clear()
+    for (const key of keys) {
+      const rec = await $.store.get(key)
+      if (rec && typeof rec === 'object' && rec.h) others.set(key, rec.h)
+    }
+    statsCache = null
+  } catch {
+    // Keep the last ones read.
+  }
+}
+
+// Save this session's record: at most once a minute unless `force`.
+async function flushTokens($, force) {
+  if (!sessionId || !isDirty) return
+  if (!force && nowMs - lastFlushMs < 60_000) return
+  try {
+    mine.last = nowMs
+    st.pruneHours(mine.h, nowMs - st.KEEP_HOURS_MS)
+    await $.store.set(tokKey(sessionId), mine)
+    lastFlushMs = nowMs
+    isDirty = false
+    statsCache = null
+  } catch {
+    // Try again at the next flush.
+  }
+}
+
+// Add a record for each finished 5-hour window of this account not yet
+// recorded: how far its figure and the weekly one moved together, and the
+// tokens and dollars logged in it (only when the log covers the whole window).
+async function harvest($) {
+  try {
+    const prefix = KEY_PREFIX + account + ':five_hour:'
+    const known = new Set(records.map((r) => r.r))
+    const weeks = weeksOf()
+    const maps = allHours()
+    let logStart = Infinity
+    for (const hours of maps) for (const hour of Object.keys(hours)) logStart = Math.min(logStart, Number(hour) * HOUR)
+    const added = []
+    for (const [key, list] of samples) {
+      if (!key.startsWith(prefix) || list.length === 0) continue
+      const resetHour = Number(key.slice(prefix.length))
+      if (resetHour * HOUR > nowMs || known.has(resetHour)) continue
+      const rec = st.windowRecord(resetHour, list, weeks) ?? { r: resetHour, p: list[list.length - 1][1], d5: 0, dw: 0 }
+      const opened = resetHour * HOUR - WINDOWS.five_hour.length
+      if (logStart <= opened) {
+        const t = st.sumRange(maps, opened, resetHour * HOUR, nowMs)
+        rec.tokens = Math.round(st.totalTokens(t))
+        rec.usd = Math.round(t.usd * 100) / 100
+      }
+      added.push(rec)
+    }
+    if (added.length === 0) return
+    const saved = await $.store.get(st.WIN_PREFIX + account)
+    const byReset = new Map((Array.isArray(saved) ? saved : records).map((r) => [r.r, r]))
+    for (const r of added) if (!byReset.has(r.r)) byReset.set(r.r, r)
+    records = [...byReset.values()].sort((a, b) => a.r - b.r).slice(-st.KEEP_WINDOWS)
+    await $.store.set(st.WIN_PREFIX + account, records)
+  } catch {
+    // The window records are an estimate; try again next session.
   }
 }

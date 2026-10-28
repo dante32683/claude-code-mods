@@ -27,7 +27,14 @@ The animated crabs show in the desktop app; the terminal gets a small text crab.
 
 ### usage-context
 
-A pane with your plan's 5-hour and weekly usage, how fast you're using it, how much per hour or day you can spend and still make the reset, and what's filling the context window. While the pane is closed, the usage bars sit above the prompt. `/meter` shows or hides the pane. It saves the last reading to `statusline-limits.json` in your Claude folder.
+Usage bars above the prompt for your plan's 5-hour and weekly limits: how much you've used, how fast you're using it, and how much per hour or day you can spend and still make the reset. The **Stats** button at the right end of the first row opens a side pane with:
+
+- tokens (input, output, cache reads and writes) and API-priced cost for this 5-hour window, today, this week, and the last 30 days, plus a list of the last 7 days;
+- estimates learned from finished windows: how much of the weekly limit one full 5-hour window uses, what 1% of each limit buys in tokens and dollars, and where 5-hour windows usually end;
+- this week's model mix;
+- what's filling the context window, by category, with the memory files, MCP tools, agents, and skills behind it.
+
+`/meter` shows or hides the pane. The token log counts only Claude Code's own requests, so chat and phone use, which count toward the same limits, aren't in it. It's kept per account (each `CLAUDE_CONFIG_DIR` separately) in the plugin store for 35 days. The last limits reading is saved to `statusline-limits.json` in your Claude folder.
 
 ### compact-plus
 

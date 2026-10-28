@@ -47,7 +47,7 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns: 120, scroll: { offset: 0, bodyRows: 8 }, view: {} },
 } as const
 
-function stubs(on: any, store: Map<string, unknown>, rateLimits: unknown[], band: unknown = { type: 'engine', ref: 1 }) {
+function stubs(on: any, store: Map<string, unknown>, rateLimits: unknown[], band: unknown = { type: 'engine', ref: 1 }, opened: string[] = []) {
   mock.clock(on, { now: NOW })
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => (store.set(e.key, e.value), { value: undefined }))
@@ -57,7 +57,7 @@ function stubs(on: any, store: Map<string, unknown>, rateLimits: unknown[], band
   on('fs.read', ($: any, e: any) => ({
     value: String(e.path).endsWith('.claude.json') ? JSON.stringify({ oauthAccount: { organizationRateLimitTier: 'default_claude_max_5x' } }) : '{}',
   }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', ($: any, e: any) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
   on('command.register', () => ({ value: undefined }))
   on('session.start', () => ({ cwd: '/work' }))
@@ -202,4 +202,120 @@ test("another plugin's band (a form) gets the band to itself", async ($, on) => 
   expect(await ui.find({ type: 'Text', text: 'a form' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^ +52%$/ })).toBeUndefined()
   await ui.unmount()
+})
+
+// A model request whose response reports this usage, through the turn.step stream.
+function stepStub(on: any, usage: Record<string, number>, model = 'claude-opus-5-5') {
+  on('turn.step', async function* (_$: any, e: any): AsyncGenerator<any, any> {
+    yield { kind: 'stop', stopReason: 'end_turn', usage: { ...usage, model } }
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { ...usage, model } }
+  })
+}
+
+async function step($: any, agentId?: string) {
+  for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId })) {
+    // drain the stream
+  }
+}
+
+test('every response adds its tokens and the measured cost to this session’s hours', async ($, on) => {
+  const store = new Map<string, unknown>()
+  stubs(on, store, limits(52))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('turn.complete', () => ({ text: 'ok' }))
+  on('session.measure', ($: any, e: any) => ({ changed: e.changed }))
+  stepStub(on, { input_tokens: 1_000, output_tokens: 500, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 8_500 })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await step($)
+  await step($, 'agent-1')
+  await ($ as any).session.measure({ context: { tokens: 1, window: 2 }, rateLimits: [], cost: { usd: 1.5 }, changed: ['cost'] })
+  await ($ as any).turn.complete({ turnId: 't', answer: 'ok', durationMs: 1, isAborted: false, reason: 'answer' })
+
+  const rec = store.get('tok:main:sess-1') as any
+  const bucket = rec.h[String(Math.floor(NOW / HOUR))]
+  // Main loop and subagent alike, by model: input, output, cache read, cache write, calls.
+  expect(bucket.m['opus-5-5']).toEqual([2_000, 1_000, 180_000, 17_000, 2])
+  expect(bucket.usd).toBe(1.5)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: 'Usage stats' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '200k tokens  $1.50' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^in 2k · out 1k · cache read 180k · write 17k · 2 calls$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Models this week: opus-5-5 100%/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('finished 5h windows give the share of the weekly limit one window is', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const weekReset = NOW + 4 * 24 * HOUR
+  const week: [number, number][] = []
+  // Three finished windows, 10, 15 and 20 hours ago: each moved 5h by 50 points and the week by 4.
+  let wk = 10
+  for (const hoursAgo of [20, 15, 10]) {
+    const reset = NOW - hoursAgo * HOUR
+    const opened = reset - 5 * HOUR
+    store.set('rl:main:five_hour:' + Math.round(reset / HOUR), [[opened + 10 * 60_000, 5], [reset - 10 * 60_000, 55]])
+    week.push([opened + 5 * 60_000, wk], [reset - 15 * 60_000, wk + 4])
+    wk += 4
+  }
+  store.set('rl:main:seven_day:' + Math.round(weekReset / HOUR), week)
+  stubs(on, store, limits(52))
+  on('session.id', () => ({ value: 'sess-2' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // 4 weekly points per 50 five-hour points: a full window is 8% of the week, 12.5 windows.
+  const saved = store.get('win:main') as any[]
+  expect(saved.length).toBe(3)
+  expect(saved[0]).toMatchObject({ p: 55, d5: 50, dw: 4 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^One 5h window ≈ 8\.0% of the week, about 13 windows a week \(3 windows\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h windows end near 55% on average \(3 in 30 days\)$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a quiet session’s hours are merged into the account’s and its key removed', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const hour = String(Math.floor((NOW - 8 * HOUR) / HOUR))
+  store.set('tok:main:old', { last: NOW - 7 * HOUR, usdSeen: 3, h: { [hour]: { usd: 3, m: { 'haiku-5-5': [10, 20, 30, 40, 2] } } } })
+  store.set('tok:main:busy', { last: NOW - 10 * 60_000, usdSeen: 1, h: { [hour]: { usd: 1, m: { 'haiku-5-5': [1, 1, 1, 1, 1] } } } })
+  store.set('tok:.claude-work:other', { last: NOW - 9 * HOUR, usdSeen: 2, h: {} })
+  stubs(on, store, limits(52))
+  on('session.id', () => ({ value: 'sess-3' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(store.has('tok:main:old')).toBe(false)
+  expect(store.has('tok:main:busy')).toBe(true)
+  // Another account's sessions are that account's to merge.
+  expect(store.has('tok:.claude-work:other')).toBe(true)
+  expect((store.get('toks:main') as any)[hour].m['haiku-5-5']).toEqual([10, 20, 30, 40, 2])
+  expect(store.has('merge')).toBe(false)
+})
+
+test('the band keeps the usage rows while the side pane is open', async ($, on) => {
+  stubs(on, new Map(), limits(52))
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The pane is the extra view: stats always open there.
+  expect(await pane.find({ type: 'Text', text: 'Usage stats' })).toBeDefined()
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ type: 'Text', text: /^ +52%$/ })).toBeDefined()
+  expect(await band.find({ key: 'stats' })).toBeDefined()
+  // The band has no stats view of its own; they live in the pane.
+  expect(await band.find({ type: 'Text', text: 'Usage stats' })).toBeUndefined()
+  await band.unmount()
+  await pane.unmount()
+})
+
+test('the band’s Stats button opens the side pane and leaves the closed setting alone', async ($, on) => {
+  const store = new Map<string, unknown>([['paneHidden', true]])
+  const opened: string[] = []
+  stubs(on, store, limits(52), undefined, opened)
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  expect(opened).toEqual([])
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'stats' })
+  expect(opened).toEqual(['usage-context'])
+  expect(store.get('paneHidden')).toBe(true)
+  expect(await band.find({ type: 'Text', text: 'Usage stats' })).toBeUndefined()
+  await band.unmount()
 })
