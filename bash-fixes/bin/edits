@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# edits on PATH (the plugin's bin folder), for shells that don't load
+# hooks/guards.sh: an isolation-worktree subagent's Bash runs without it.
+exec python "$(dirname -- "${BASH_SOURCE[0]}")/edits.py" "$@"

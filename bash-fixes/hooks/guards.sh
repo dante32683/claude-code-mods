@@ -19,6 +19,53 @@ rg() {
   MSYS2_ARG_CONV_EXCL='*' command rg "${args[@]}"
 }
 
+# adb is native too, so the same rewriting turns phone paths like /sdcard/x
+# into C:/Program Files/Git/sdcard/x. Turn it off. Only push, pull, and the
+# install commands take laptop paths, so only theirs are converted, and only
+# when they exist here; `adb shell ls /tmp` keeps the phone's /tmp.
+adb() {
+  local args=() a sub='' local_paths='' skip=''
+  for a in "$@"; do
+    if [[ -n $skip ]]; then
+      skip=''
+    elif [[ -z $sub && $a == -[stHPL] ]]; then
+      skip=1 # global options that take a value: -s serial, -t id, -H host, -P port, -L socket
+    elif [[ -z $sub && $a != -* ]]; then
+      sub=$a
+      case $sub in push | pull | install | install-multiple | install-multi-package | sideload) local_paths=1 ;; esac
+    fi
+    if [[ -n $local_paths && $a == /?* && -e $a ]]; then
+      args+=("$(cygpath -m -- "$a")")
+    else
+      args+=("$a")
+    fi
+  done
+  MSYS2_ARG_CONV_EXCL='*' command adb "${args[@]}"
+}
+
+# gh is native too. In `gh api` the rewriting turns the endpoint /repos/x into
+# C:/Program Files/Git/repos/x ("invalid API endpoint") and field values like
+# -f path=/docs into Windows paths. For `gh api` only, turn it off and convert
+# only local files that exist: an --input file or a -F key=@file value. Other
+# gh commands keep the default rewriting, since their / arguments are local
+# paths, some not made yet (gh repo clone x /c/new).
+gh() {
+  if [[ ${1-} != api ]]; then
+    command gh "$@"
+    return
+  fi
+  local args=() a
+  for a in "$@"; do
+    if [[ $a == /?* && -e $a ]]; then
+      a=$(cygpath -m -- "$a")
+    elif [[ $a == ?*=@/?* && -e ${a#*=@} ]]; then
+      a="${a%%=@*}=@$(cygpath -m -- "${a#*=@}")"
+    fi
+    args+=("$a")
+  done
+  MSYS2_ARG_CONV_EXCL='*' command gh "${args[@]}"
+}
+
 # sed -i exits 0 even when its script matched nothing. With -i, fail when
 # none of the files it was given changed.
 sed() {
@@ -44,6 +91,8 @@ sed() {
   command sed "$@" || return
   [[ $(md5sum -- "${files[@]}") != "$before" ]] && return 0
   echo "sed: the script matched nothing; no change in ${files[*]}" >&2
+  # A \n in the script only matches with -z: sed reads one line at a time.
+  [[ $* == *'\n'* ]] && echo "sed: it reads one line at a time, so a \\n in a pattern never matches; use edits for text over several lines" >&2
   return 1
 }
 
