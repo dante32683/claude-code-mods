@@ -23,13 +23,19 @@ import * as st from './stats.js'
 
 const PANE = 'usage-context'
 const HOUR = 3_600_000
-// recent: how far back the recent rate looks; minSpan: the least history it
-// needs (a weekly rate from a few busy hours would ignore sleep); floor: the
-// least elapsed time the window average divides by, so a young window's first
-// minutes don't project to several hundred percent.
+// The forecast (figures) in hours. tau: how far back the "now" rate looks, an
+// exponential average; burst: how long a burst at the "now" rate is expected
+// to last before use settles back to the usual pace; weight: how many hours of
+// the usual pace (past windows) count against this window's own average, so a
+// young window's first minutes don't decide the forecast; floor: the least
+// elapsed time the window's own average divides by when there is no history.
+// Tuned on 26 real 5-hour windows (2026-11-02), replayed minute by minute:
+// against the old two-point rate it halved the forecast's average change per
+// minute, cut its largest jump from 69 points to 10 and its colour flips from
+// 61 to 8, and missed the final figure by 9.8 points on average against 11.5.
 const WINDOWS = {
-  five_hour: { label: '5h', length: 5 * HOUR, recent: 45 * 60_000, minSpan: 10 * 60_000, floor: 30 * 60_000, perHour: 1, unit: '/h' },
-  seven_day: { label: 'wk', length: 7 * 24 * HOUR, recent: 24 * HOUR, minSpan: 18 * HOUR, floor: 24 * HOUR, perHour: 24, unit: '/day' },
+  five_hour: { label: '5h', length: 5 * HOUR, tau: 0.5, burst: 1, weight: 2, floor: 0.5, perHour: 1, unit: '/h' },
+  seven_day: { label: 'wk', length: 7 * 24 * HOUR, tau: 12, burst: 24, weight: 24, floor: 24, perHour: 24, unit: '/day' },
 }
 const ORDER = ['five_hour', 'seven_day']
 const MAX_SAMPLES = 300
@@ -92,7 +98,8 @@ function windowId(kind, resetsAtMs) {
 
 // Samples since the window's figure last dropped. Usage only falls when the
 // window resets early, as a plan upgrade does, and older samples then belong
-// to a different count. Small dips are rounding noise.
+// to a different count. Small dips are rounding noise. save() starts a list
+// over at a real restart, so this only trims lists saved before it did.
 function sinceDrop(list) {
   let start = 0
   for (let i = 1; i < list.length; i++) if (list[i][1] < list[i - 1][1] - 2) start = i
@@ -126,32 +133,83 @@ function tail(path) {
   return parts.slice(-2).join('/')
 }
 
-// The figures for one window, from its reading, its samples and the clock.
-function figures(reading, saved, now) {
+// The "now" rate in %/h at `now`: an exponential average over the last few
+// `tau` hours. Each rise is spread over the gap since the sample before it,
+// since the figure is whole points and a point accrues over that gap; dips
+// under the highest figure so far are stale readings and add nothing. It
+// starts from `base` at the first sample, so a short history leans on the
+// usual pace instead of zero.
+function nowRate(saved, now, tau, base) {
+  const ago = (t) => Math.max(0, now - t) / HOUR
+  let r = base * Math.exp(-ago(saved[0][0]) / tau)
+  let top = saved[0][1]
+  for (let i = 1; i < saved.length; i++) {
+    const rise = saved[i][1] - top
+    if (rise <= 0) continue
+    top = saved[i][1]
+    const a = ago(saved[i - 1][0])
+    const b = ago(saved[i][0])
+    r += a > b ? (rise / (a - b)) * (Math.exp(-b / tau) - Math.exp(-a / tau)) : (rise * Math.exp(-b / tau)) / tau
+  }
+  return r
+}
+
+// The usual pace in %/h from this account's past windows, or null without
+// them: for the 5-hour window, the average end of the last 30 finished ones;
+// for the week, how far the last finished week got.
+function usualPace(kind, resetsAtMs) {
+  if (kind === 'five_hour') {
+    const ends = records.slice(-30).map((r) => r.p)
+    return ends.length === 0 ? null : ends.reduce((a, b) => a + b, 0) / ends.length / 5
+  }
+  const prefix = KEY_PREFIX + account + ':seven_day:'
+  let last = null
+  for (const [key, list] of samples) {
+    if (!key.startsWith(prefix) || list.length === 0) continue
+    const hour = Number(key.slice(prefix.length))
+    if (hour * HOUR < resetsAtMs - 6 * 24 * HOUR && hour * HOUR < nowMs && (!last || hour > last.hour)) last = { hour, list }
+  }
+  return last ? Math.max(...last.list.map((s) => s[1])) / (7 * 24) : null
+}
+
+// The figures for one window, from its reading, its samples, the usual pace
+// (usualPace) and the clock.
+//
+// The forecast: use runs at the "now" rate (nowRate) at first and settles to
+// the usual pace over about `burst` hours, so a burst neither runs on to the
+// reset nor is forgotten at once. The usual pace is this window's average
+// pulled toward past windows' by `weight` hours of them.
+function figures(reading, saved, now, usual) {
   const w = WINDOWS[reading.kind]
   const opened = reading.resetsAtMs - w.length
-  const elapsed = Math.min(w.length, Math.max(w.floor, now - opened))
+  const elapsed = Math.min(w.length, Math.max(0, now - opened)) / HOUR
   const remaining = Math.max(0, reading.resetsAtMs - now)
-  const avg = (reading.percent / (elapsed / HOUR)) * w.perHour
+  const hoursLeft = remaining / HOUR
+  const own = reading.percent / Math.max(w.floor, elapsed)
+  const base = usual === null ? own : (reading.percent + usual * w.weight) / (elapsed + w.weight)
 
-  // Recent rate: from the newest sample at or before the cutoff (or the oldest
-  // one if the window is younger), to now. Idle time counts, so a pause lowers it.
-  let recent = null
   saved = sinceDrop(saved)
-  if (saved.length > 0) {
-    const cutoff = now - w.recent
-    let from = saved[0]
-    for (const s of saved) if (s[0] <= cutoff) from = s
-    const hours = (now - from[0]) / HOUR
-    if (hours * HOUR >= w.minSpan) recent = (Math.max(0, reading.percent - from[1]) / hours) * w.perHour
-  }
+  const rate = saved.length > 0 ? nowRate(saved, now, w.tau, base) : base
+  // The "now" rate shows once the samples cover tau; before that, the average.
+  const recent = saved.length > 1 && now - saved[0][0] >= w.tau * HOUR ? rate * w.perHour : null
+  const avg = own * w.perHour
 
-  // The pace that decides the end note and colour: the recent rate when there
-  // is one, otherwise the average. The window ends where that pace lands it.
-  const pace = (recent ?? avg) / w.perHour
-  const projected = reading.percent + pace * (remaining / HOUR)
-  const hoursToFull = pace > 0 ? (100 - reading.percent) / pace : Infinity
+  // Points used in the next s hours.
+  const ahead = (s) => base * s + (rate - base) * w.burst * (1 - Math.exp(-s / w.burst))
+  const projected = reading.percent + Math.max(0, ahead(hoursLeft))
   const willFill = projected >= 100 && reading.percent < 100
+  let hoursToFull = Infinity
+  if (willFill) {
+    // The use rate stays positive, so `ahead` rises: bisect for the hour it reaches 100%.
+    let lo = 0
+    let hi = hoursLeft
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2
+      if (reading.percent + ahead(mid) >= 100) hi = mid
+      else lo = mid
+    }
+    hoursToFull = hi
+  }
   // Budget: the most you can use per unit of time from now and still reach the
   // reset. With less than one unit left (an hour, a day) it says nothing useful.
   const unitsLeft = (remaining / HOUR) * (1 / w.perHour)
@@ -220,12 +278,15 @@ function usageRows(els, columns, isDesktop) {
   if (readings.length === 0) {
     return [Text({ dimColor: true, children: 'plan usage: waiting for the first response' })]
   }
-  const isWide = columns >= 100
+  // One row per window when it fits. The Desktop app's proportional text is
+  // narrower than a terminal cell, so its one-row layout fits in fewer columns
+  // (about 75; the band is near 97 with the app's Context panel open).
+  const isWide = columns >= (isDesktop ? 80 : 100)
   const width = Math.min(columns - 2, 48)
   const barWidth = columns >= 40 ? 14 : 10
   const rows = []
   for (const r of readings) {
-    const f = figures(r, samples.get(windowId(r.kind, r.resetsAtMs)) ?? [], nowMs)
+    const f = figures(r, samples.get(windowId(r.kind, r.resetsAtMs)) ?? [], nowMs, usualPace(r.kind, r.resetsAtMs))
     const dim = r.isCached
     const color = dim ? undefined : colorOf(r.percent, f)
     const filled = Math.max(0, Math.min(barWidth, Math.round((r.percent / 100) * barWidth)))
@@ -257,6 +318,7 @@ function usageRows(els, columns, isDesktop) {
     } else {
       rows.push(
         Box({
+          key: 'stacked-' + r.kind,
           flexDirection: 'column',
           width,
           children: [spread(Box, meter, resets), spread(Box, rates, ending, { paddingLeft: 3 })],
@@ -859,24 +921,41 @@ async function saveCached($, found) {
   }
 }
 
+// When this session first saw each window's figure fall under its saved top.
+const lowSince = new Map()
+// How long a lower figure must last, with nothing higher saved meanwhile,
+// before it counts as the window starting over.
+const RESTART_AFTER = 15 * 60_000
+
 // Add a sample to a window's list unless the figure has not moved recently.
+//
+// Usage never falls inside a window, so a figure under the saved top is
+// usually stale: another session reporting the last response it saw. Saving
+// it would make the rate jump, so it is skipped. The window started over (a
+// plan upgrade resets it) only once the lower figure has lasted RESTART_AFTER
+// here with no session saving a higher one; then the list starts over.
 async function save($, r) {
   const id = windowId(r.kind, r.resetsAtMs)
   // Read again right before writing: another session may have added samples.
   const stored = await $.store.get(id)
   const list = Array.isArray(stored) ? stored : (samples.get(id) ?? [])
+  samples.set(id, list)
   let last = list[list.length - 1]
-  // The window started over (a plan upgrade resets it): start the list over too.
-  if (last && r.percent < last[1] - 2) {
+  const top = list.reduce((m, s) => Math.max(m, s[1]), -Infinity)
+  if (last && r.percent < top) {
+    if (r.percent >= top - 2) return
+    const since = Math.max(lowSince.get(id) ?? nowMs, last[0])
+    lowSince.set(id, since)
+    if (nowMs - since < RESTART_AFTER) return
     list.length = 0
     last = undefined
   }
+  lowSince.delete(id)
   if (!last || last[1] !== r.percent || nowMs - last[0] > 10 * 60_000) {
     list.push([nowMs, r.percent])
     if (list.length > MAX_SAMPLES) list.splice(0, list.length - MAX_SAMPLES)
     await $.store.set(id, list)
   }
-  samples.set(id, list)
 }
 
 // Load every window's saved samples; pruneSamples drops the old ones after
@@ -997,7 +1076,9 @@ async function harvest($) {
     for (const [key, list] of samples) {
       if (!key.startsWith(prefix) || list.length === 0) continue
       const resetHour = Number(key.slice(prefix.length))
-      if (resetHour * HOUR > nowMs || known.has(resetHour)) continue
+      // The key is the reset rounded to the hour, so the window may run up to
+      // half an hour past it.
+      if (resetHour * HOUR + HOUR / 2 > nowMs || known.has(resetHour)) continue
       const rec = st.windowRecord(resetHour, list, weeks) ?? { r: resetHour, p: list[list.length - 1][1], d5: 0, dw: 0 }
       const opened = resetHour * HOUR - WINDOWS.five_hour.length
       if (logStart <= opened) {

@@ -48,7 +48,7 @@ const BAND = {
 } as const
 
 function stubs(on: any, store: Map<string, unknown>, rateLimits: unknown[], band: unknown = { type: 'engine', ref: 1 }, opened: string[] = []) {
-  mock.clock(on, { now: NOW })
+  const clock = mock.clock(on, { now: NOW })
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => (store.set(e.key, e.value), { value: undefined }))
   on('store.delete', ($: any, e: any) => (store.delete(e.key), { value: undefined }))
@@ -69,6 +69,7 @@ function stubs(on: any, store: Map<string, unknown>, rateLimits: unknown[], band
   }))
   // In the band, the engine's own (empty) drawing unless a test puts another plugin's tree there.
   on('ui.render', ($: any, e: any) => (e.component === 'AbovePrompt' ? band : { type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+  return clock
 }
 
 const limits = (fiveHourPct: number) => [
@@ -185,13 +186,40 @@ test('a live reading refreshes the saved fallback', async ($, on) => {
   expect(saved.seven_day.used_percentage).toBe(7)
 })
 
-test('a drop in the figure starts the saved samples over', async ($, on) => {
+test('a lower figure is a stale reading until it lasts, then the samples start over', async ($, on) => {
   const store = new Map<string, unknown>()
   const id = 'rl:main:five_hour:' + Math.round((NOW + 3 * HOUR) / HOUR)
   store.set(id, [[NOW - 40 * 60_000, 80]])
-  stubs(on, store, limits(5))
+  const clock = stubs(on, store, limits(5))
+  on('session.measure', ($: any, e: any) => ({ changed: e.changed }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  expect(store.get(id)).toEqual([[NOW, 5]])
+  // Another session's old figure: skipped.
+  expect(store.get(id)).toEqual([[NOW - 40 * 60_000, 80]])
+  // Still low 16 minutes later with nothing higher saved: the window started over.
+  await clock.advance(16 * 60_000)
+  await ($ as any).session.measure({ context: { tokens: 1, window: 2 }, rateLimits: limits(6), changed: ['rateLimits'] })
+  expect(store.get(id)).toEqual([[NOW + 16 * 60_000, 6]])
+})
+
+test('a burst fades toward the usual pace instead of running on to the reset', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const reset = NOW + 3 * HOUR
+  const id = 'rl:main:five_hour:' + Math.round(reset / HOUR)
+  // Past windows ended near 20% (4%/h). This one idled at 10% for over an
+  // hour, then jumped 10 points in the last 10 minutes: 60%/h right now. Run
+  // on for 3 hours that fills the window; fading over about an hour, it ends
+  // near 50%.
+  store.set('win:main', Array.from({ length: 10 }, (_, i) => ({ r: 1000 + i * 5, p: 20, d5: 20, dw: 2 })))
+  store.set(id, [[NOW - 2 * HOUR, 0], [NOW - 100 * 60_000, 10], [NOW - 10 * 60_000, 10], [NOW, 20]])
+  stubs(on, store, limits(20))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const end = await ui.find({ type: 'Text', text: /^ends near \d+%$/ })
+  expect(end).toBeDefined()
+  const pct = Number(/(\d+)%/.exec(JSON.stringify(end))![1])
+  expect(pct).toBeGreaterThan(35)
+  expect(pct).toBeLessThan(65)
+  await ui.unmount()
 })
 
 test("another plugin's band (a form) gets the band to itself", async ($, on) => {
@@ -304,6 +332,19 @@ test('the band keeps the usage rows while the side pane is open', async ($, on) 
   expect(await band.find({ type: 'Text', text: 'Usage stats' })).toBeUndefined()
   await band.unmount()
   await pane.unmount()
+})
+
+test('the Desktop band keeps one row per window at a width that stacks the terminal’s', async ($, on) => {
+  stubs(on, new Map(), limits(52))
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  const props = { ...BAND.props, bodyColumns: 90 }
+  const desktop = await $.ui.mount({ ...BAND, props, surface: 'desktop' })
+  expect(await desktop.find({ type: 'Text', text: /^ +52%$/ })).toBeDefined()
+  expect(await desktop.find({ key: 'stacked-five_hour' })).toBeUndefined()
+  await desktop.unmount()
+  const terminal = await $.ui.mount({ ...BAND, props, surface: 'terminal' })
+  expect(await terminal.find({ key: 'stacked-five_hour' })).toBeDefined()
+  await terminal.unmount()
 })
 
 test('the band’s Stats button opens the side pane and leaves the closed setting alone', async ($, on) => {

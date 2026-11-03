@@ -1,6 +1,6 @@
 {
   "name": "usage-context",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "5-hour and weekly plan usage with burn rate above the prompt, plus a pane (terminal and Desktop) with token and cost stats from a per-account log and where the context window is going.",
   "author": { "name": "dante32683" }
 }
