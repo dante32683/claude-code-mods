@@ -38,7 +38,7 @@ Usage bars above the prompt for your plan's 5-hour and weekly limits: how much y
 
 ### compact-plus
 
-Better compaction. Before each compaction it saves the whole conversation to a searchable file in `~/.claude/compact-history/` and tells Claude where it is, so details the summary drops can still be found. Your own messages are kept word for word, the summary is written as a handoff, instruction files are re-read afterward, and when a turn ends close to the auto-compact limit it compacts right away instead of mid-task. History older than 30 days is deleted. Options: `turnEndPercent` and `verbatimUserTokens`.
+Better compaction. Before each compaction it saves a searchable history file in `~/.claude/compact-history/`. Tool inputs are capped at 2,000 characters and tool results at 12,000; the original `.jsonl` transcript retains full tool payloads. Recent user messages may also be kept word for word in the summary, capped at 8,000 characters each and by the `verbatimUserTokens` budget in total. Use the transcript for full long messages and tool payloads. The summary is written as a handoff, instruction files are re-read afterward, and when a turn ends close to the auto-compact limit it compacts right away instead of mid-task. History older than 30 days is deleted. Options: `turnEndPercent` and `verbatimUserTokens`.
 
 ### repo-peers
 
