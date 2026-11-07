@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { bashEdits } from '../hooks/register'
 
 const DIR = 'C:/Temp/claude-peers'
 const REPO = 'c:/users/x/project/.git'
@@ -45,8 +46,7 @@ test('a working peer in the same checkout is named once, then again when files o
   const files = new Map([[`${DIR}/peer1.json`, peer()]])
   stubs(on, files)
   const r1: any = await prompt($)
-  expect(r1.additionalContext[0]).toContain('"MCP result fixes": same checkout (main), working now (updated 2 min ago)')
-  expect(r1.additionalContext[0]).toContain('edited: tasks.md')
+  expect(r1.additionalContext[0]).toContain('other chats in this repo (same checkout, main):\n- "MCP result fixes": working now; edited tasks.md\n')
   expect(r1.additionalContext[0]).toContain('send_message')
   const r2: any = await prompt($)
   expect(r2.additionalContext).toBeUndefined()
@@ -54,7 +54,36 @@ test('a working peer in the same checkout is named once, then again when files o
   expect(JSON.parse(files.get(`${DIR}/me1.json`)!).files).toEqual(['tasks.md'])
   await clock.advance(MIN)
   const r3: any = await prompt($)
-  expect(r3.additionalContext[0]).toContain('edited the same files as this chat: tasks.md')
+  expect(r3.additionalContext[0]).toContain('"MCP result fixes": working now; edited the same files as this chat: tasks.md\n')
+})
+
+test('a note lists three files per peer, shortened, without temp files; shared files in full', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const peerFiles = [
+    'projects/widgets/diffeq/docs/architecture.md',
+    '$temp/emag-review/show.py',
+    'projects/widgets/emag/src/em_core.c',
+    'c:/users/x/appdata/roaming/claude/notes.md',
+    'projects/widgets/emag/src/em_core.h',
+    'projects/widgets/emag/tools/emu_acceptance.js',
+  ]
+  const files = new Map([
+    [`${DIR}/peer1.json`, peer({ files: peerFiles, working: false, updated: NOW - 5 * MIN })],
+    [`${DIR}/peer2.json`, peer({ id: 'peer2', title: 'Shared', files: ['projects/widgets/context.md', 'a/b.md'] })],
+  ])
+  stubs(on, files)
+  await prompt($)
+  await edit($, 'C:\\Users\\x\\Project\\projects\\widgets\\context.md')
+  await clock.advance(MIN)
+  const text: string = ((await prompt($)) as any).additionalContext[0]
+  expect(text).toBe(
+    [
+      'repo-peers: other chats in this repo (same checkout, main):',
+      '- "MCP result fixes": idle 6 min; edited emag/tools/emu_acceptance.js, emag/src/em_core.h, emag/src/em_core.c, +1 more',
+      '- "Shared": working now; edited the same files as this chat: projects/widgets/context.md, +1 more',
+      "If your work could collide with one, send it a short send_message on what you're changing.",
+    ].join('\n'),
+  )
 })
 
 test('a turn end marks this chat idle, and a session end marks it ended', async ($, on) => {
@@ -85,7 +114,7 @@ test('a peer in another worktree of the repo is named with its path', async ($, 
   mock.clock(on, { now: NOW })
   stubs(on, new Map([[`${DIR}/peer1.json`, peer({ checkout: 'c:/users/x/project-wt', branch: 'feature', working: false, updated: NOW - 10 * MIN })]]))
   const r: any = await prompt($)
-  expect(r.additionalContext[0]).toContain('worktree c:/users/x/project-wt (feature), idle since 10 min ago')
+  expect(r.additionalContext[0]).toContain('repo-peers: other chats in this repo:\n- "MCP result fixes": worktree c:/users/x/project-wt (feature), idle 10 min')
 })
 
 test('outside a git repo it stays quiet and writes nothing', async ($, on) => {
@@ -111,14 +140,14 @@ test('any tool call refreshes the heartbeat, at most every 2 minutes', async ($,
   expect(JSON.parse(files.get(`${DIR}/me1.json`)!).updated).toBe(NOW + 3 * MIN)
 })
 
-const bashCall = ($: any) => $.classic.PostToolUse({ session_id: 'me1', cwd: 'C:\\Users\\x\\Project', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {}, tool_use_id: 't' })
+const bashCall = ($: any) => $.classic.PostToolUse({ session_id: 'me1', cwd: ROOT, tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {}, tool_use_id: 't' })
 
 test('a peer that starts working mid-turn is named on the next tool call after a minute', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const files = new Map([[`${DIR}/peer1.json`, peer({ working: false, updated: NOW - MIN })]])
   stubs(on, files)
   const r1: any = await prompt($)
-  expect(r1.additionalContext[0]).toContain('idle since just now')
+  expect(r1.additionalContext[0]).toContain('"MCP result fixes": idle 1 min')
   // The peer starts a turn; checks within a minute of the last one don't look.
   await clock.advance(30_000)
   files.set(`${DIR}/peer1.json`, peer({ working: true, updated: NOW + 30_000 }))
@@ -126,8 +155,8 @@ test('a peer that starts working mid-turn is named on the next tool call after a
   expect(early.additionalContext).toBeUndefined()
   await clock.advance(MIN)
   const r2: any = await bashCall($)
-  expect(r2.additionalContext[0]).toContain('while this turn ran, another Claude chat started working')
-  expect(r2.additionalContext[0]).toContain('"MCP result fixes": same checkout (main), working now')
+  expect(r2.additionalContext[0]).toContain('while this turn ran, another chat started or became active in this repo (same checkout, main):')
+  expect(r2.additionalContext[0]).toContain('"MCP result fixes": working now')
   // Still working: not named again.
   await clock.advance(2 * MIN)
   const r3: any = await bashCall($)
@@ -149,7 +178,7 @@ test('a peer that keeps starting turns is named for starting at most every 15 mi
   expect((await flip(true)).additionalContext).toBeUndefined() // 4 min after being named
   await clock.advance(12 * MIN)
   await flip(false)
-  expect((await flip(true)).additionalContext[0]).toContain('started working')
+  expect((await flip(true)).additionalContext[0]).toContain('started or became active')
 })
 
 test('a peer that started while this chat was idle is named at the next prompt', async ($, on) => {
@@ -157,9 +186,49 @@ test('a peer that started while this chat was idle is named at the next prompt',
   const files = new Map([[`${DIR}/peer1.json`, peer({ working: false, updated: NOW - MIN })]])
   stubs(on, files)
   await prompt($)
-  await $.classic.Stop({ session_id: 'me1', cwd: 'C:\\Users\\x\\Project', stop_hook_active: false })
+  await $.classic.Stop({ session_id: 'me1', cwd: ROOT, stop_hook_active: false })
   await clock.advance(5 * MIN)
   files.set(`${DIR}/peer1.json`, peer({ working: true, updated: NOW + 5 * MIN }))
   const r: any = await prompt($)
-  expect(r.additionalContext[0]).toContain('"MCP result fixes": same checkout (main), working now')
+  expect(r.additionalContext[0]).toContain('"MCP result fixes": working now')
+})
+
+test('bashEdits finds edits targets and cat heredoc targets, after a leading cd', async () => {
+  const cmd = "cd ~/dev/proj && edits <<'EOF' && git commit -qam x\n=== core/a.md\n--- old\nx\n+++ new\ny\n=== /c/Users/x/.claude/CLAUDE.md\n--- old\na\n+++ new\nb\nEOF"
+  expect(bashEdits(cmd, 'C:/Users/x/project', 'C:/Users/x')).toEqual([
+    'C:/Users/x/dev/proj/core/a.md',
+    'C:/Users/x/.claude/CLAUDE.md',
+  ])
+  expect(bashEdits("cat > notes/x.md <<'EOF'\nhi\nEOF", 'C:/L', 'C:/H')).toEqual(['C:/L/notes/x.md'])
+  const guarded = "source 'C:/p/hooks/guards.sh' 2>/dev/null; set -o pipefail; cd ~/dev/proj && edits <<'X'\n=== a.md\n--- old\nx\n+++ new\ny\nX"
+  expect(bashEdits(guarded, 'C:/L', 'C:/H')).toEqual(['C:/H/dev/proj/a.md'])
+  expect(bashEdits('echo "=== not an edit"\nls', 'C:/L', 'C:/H')).toEqual([])
+})
+
+test('a peer that began after this chat is tagged as a new chat; an older one is not', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const files = new Map([
+    [`${DIR}/peer1.json`, peer({ started: NOW + MIN })],
+    [`${DIR}/peer2.json`, peer({ id: 'peer2', title: 'Older chat', started: NOW - 10 * MIN })],
+  ])
+  stubs(on, files)
+  const r: any = await prompt($)
+  expect(r.additionalContext[0]).toContain('"MCP result fixes": working now, new chat; edited tasks.md')
+  expect(r.additionalContext[0]).toContain('"Older chat": working now; edited tasks.md')
+})
+
+test('a new chat whose short turn ended between checks is still named, once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files = new Map<string, string>()
+  stubs(on, files)
+  await prompt($)
+  // A new chat starts and finishes its turn before this chat's next check.
+  await clock.advance(2 * MIN)
+  files.set(`${DIR}/peer1.json`, peer({ working: false, updated: NOW + MIN, started: NOW + 30_000 }))
+  const r1: any = await bashCall($)
+  expect(r1.additionalContext[0]).toContain('started or became active')
+  expect(r1.additionalContext[0]).toContain('"MCP result fixes": idle 1 min, new chat')
+  await clock.advance(2 * MIN)
+  const r2: any = await bashCall($)
+  expect(r2.additionalContext).toBeUndefined()
 })
