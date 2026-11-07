@@ -1,5 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import {
+  detachedJobReason,
   guardRmTargets,
   hasExpandedPwshDollar,
   hkcuWriteNote,
@@ -217,6 +218,8 @@ test('an inline script that rewrites a file in place is refused', () => {
     "node -e \"const fs=require('fs');const s=fs.readFileSync(p,'utf8');fs.writeFileSync(p,s.replace('a','b'))\"",
     "py -3 - <<'EOF'\nfor f in files:\n    t=open(f).read()\n    open(f,'w').write(t.replace('a','b'))\nEOF",
     "python - <<'EOF'\nt=open(\"a.md\").read()\nopen('a.md','w').write(t.replace('a','b'))\nEOF",
+    // A file written by cat first doesn't hide the real edit after it.
+    "cat > a.txt <<'EOF'\nhello\nEOF\npython - <<'EOF'\nt=open('a.md').read()\nopen('a.md','w').write(t.replace('a','b'))\nEOF",
   ])
     expect(rewritesFileInScript(c)).toBe(true)
   expect(scriptEditReason(SLICE_SCRIPT, 'Fix parsing')).toContain('--- from')
@@ -230,6 +233,8 @@ test('scripts that read, write elsewhere, or opt out pass', () => {
     'python scripts/fix.py a.c', // a saved script isn't read
     "cat > notes.md <<'EOF'\nt=open(p).read(); open(p,'w').write(t.replace('a','b'))\nEOF", // no interpreter runs it
     "edits <<'EDITS'\n=== a.md\n--- old\nx\n+++ new\ny\nEDITS",
+    // A JSON round trip after writing a JS file whose source holds .replace(.
+    "cat > src/quiz.js <<'EOF'\nconst BASE = src.replace(/[^/]*$/, '')\nEOF\nnode -e 'const fs=require(\"fs\");const p=JSON.parse(fs.readFileSync(\"package.json\"));p.x=1;fs.writeFileSync(\"package.json\",JSON.stringify(p))'",
   ])
     expect(rewritesFileInScript(c)).toBe(false)
   expect(scriptEditReason(SLICE_SCRIPT, 'Re-encode the cp1252 file [script-edit]')).toBeUndefined()
@@ -269,4 +274,29 @@ test('HKCU reads, HKCU\\Environment, HKLM, Explorer hand-offs, and heredoc bodie
   expect(hkcuWriteNote('rg -n "HKCU" notes.md && New-Item -ItemType Directory x')).toBeUndefined()
   // A known false positive, harmless since the note never blocks: an HKCU path that is only searched for.
   expect(hkcuWriteNote("rg -n 'HKCU:\\Software' notes.md && New-Item -ItemType Directory x")).toBeDefined()
+})
+
+test('a job detached with & or nohup is refused', () => {
+  for (const c of [
+    './gradlew.bat assemble > log 2>&1 &',
+    'cd x && (claude -p < p.md > r.md; echo rc=$?) &\necho launched',
+    'nohup ./gradlew.bat build > log 2>&1 &',
+    'A=1 nohup python job.py',
+    'sleep 60 & # watcher',
+  ])
+    expect(detachedJobReason(c)).toContain('run_in_background')
+})
+
+test('&&, redirects, quoted &, and a later wait pass', () => {
+  for (const c of [
+    'make && make test',
+    'cmd > log 2>&1',
+    'cmd &> log',
+    'cmd |& tee log',
+    "echo 'a & b'",
+    'echo "x &"',
+    'a & b & wait',
+    "cat <<'EOF'\nrun &\nEOF",
+  ])
+    expect(detachedJobReason(c)).toBeUndefined()
 })

@@ -3,6 +3,12 @@
 # and programs it starts. Only Git Bash (MSYS) needs them.
 [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]] || return 0
 
+# The tool gives a command no input, but its shell's stdin is a pipe that never
+# ends, so a program that reads stdin when it has no file argument waits
+# forever: `rg pattern` with no path can hang a call. Read stdin from
+# /dev/null instead; pipes and heredocs in the command still work.
+exec </dev/null
+
 # rg is a native Windows program, so Git Bash rewrites any argument that
 # starts with / into a Windows path first: the pattern "/api/v1" becomes
 # "C:/Program Files/Git/api/v1" and the search silently finds nothing. Turn
@@ -65,6 +71,28 @@ gh() {
   done
   MSYS2_ARG_CONV_EXCL='*' command gh "${args[@]}"
 }
+
+# Windows tools that take /switches (powercfg /change, schtasks /create, reg
+# add /v) get the same rewriting: Git Bash turns /change into
+# C:/Program Files/Git/change and the tool says "Invalid Parameters". Turn it
+# off for them and convert only arguments that name an existing path, to the
+# backslash form these tools expect.
+__win_switch_tool() {
+  local tool=$1 args=() a
+  shift
+  for a in "$@"; do
+    if [[ $a == /?* && -e $a ]]; then
+      args+=("$(cygpath -w -- "$a")")
+    else
+      args+=("$a")
+    fi
+  done
+  MSYS2_ARG_CONV_EXCL='*' command "$tool" "${args[@]}"
+}
+for __t in powercfg schtasks reg sc netsh taskkill icacls robocopy bcdedit wevtutil; do
+  eval "$__t() { __win_switch_tool $__t \"\$@\"; }"
+done
+unset __t
 
 # sed -i exits 0 even when its script matched nothing. With -i, fail when
 # none of the files it was given changed.

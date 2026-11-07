@@ -4,8 +4,9 @@
 //             Bash would expand before PowerShell sees it, and refuse the rm
 //             commands the guard below can't make safe (rm in a -c script, an
 //             unguardable variable), saying what to write instead.
-// tool.call:  source hooks/guards.sh first (rg, adb, and gh api keep arguments
-//             that start with /, a no-op `sed -i` fails), add the :? guard to rm targets
+// tool.call:  source hooks/guards.sh first (rg, adb, gh api, and Windows /switch
+//             tools like powercfg keep arguments that start with /, a no-op
+//             `sed -i` fails), add the :? guard to rm targets
 //             that start with a variable so an empty variable stops the
 //             command instead of deleting from /, turn on pipefail where a
 //             pipeline's status gates the rest (a chain or a git write),
@@ -19,7 +20,10 @@
 //             end is refused, since it outlives the job it watches. An inline
 //             python or node script that rewrites a file with replace or
 //             slicing is refused in favor of edits, unless its description
-//             carries [script-edit]. A git command that can throw away other
+//             carries [script-edit]. A job detached with a trailing & or nohup
+//             is refused, since it outlives the call's hidden console and every
+//             console program it starts later opens a terminal window.
+//             A git command that can throw away other
 //             chats' uncommitted work (stash, --autostash, reset --hard, a
 //             non-fast-forward merge or pull, ...) is refused in a checkout
 //             where repo-peers' heartbeats show another chat (git-guard.ts),
@@ -36,6 +40,7 @@ import {
   hkcuWriteNote,
   editsReason,
   isAgentWorktree,
+  detachedJobReason,
   endlessFollow,
   scriptEditReason,
   needsErrexit,
@@ -147,7 +152,11 @@ function refusal(command: string, description: unknown): string | undefined {
       'A $NAME this command sets itself (NAME=... or for NAME in ...) passes, since Bash filling it in is the point.'
     )
   }
-  return editsReason(command) ?? scriptEditReason(command, typeof description === 'string' ? description : undefined)
+  return (
+    editsReason(command) ??
+    scriptEditReason(command, typeof description === 'string' ? description : undefined) ??
+    detachedJobReason(command)
+  )
 }
 
 export const register: Register = on => {

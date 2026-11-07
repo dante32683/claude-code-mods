@@ -1,7 +1,7 @@
 {
   "name": "bash-fixes",
-  "version": "0.6.0",
-  "description": "Fixes for Claude's Bash tool on Windows Git Bash: long commands run from a temp script, rg, gh api and adb keep arguments that start with /, a no-op sed -i fails, rm targets that start with a variable get the ${VAR:?} guard, a double-quoted pwsh -Command body with $ is refused, pipefail and errexit stop a git write after a failed step, git commands that can throw away another chat's uncommitted work are refused where repo-peers sees one, endless tail -f watches and inline file-rewrite scripts are refused, and `edits` makes all-or-nothing text edits that keep line endings.",
+  "version": "0.7.0",
+  "description": "Fixes for Claude's Bash tool on Windows Git Bash: long commands run from a temp script, rg, gh api and adb keep arguments that start with / (so do powercfg, schtasks, and other Windows tools), a bare rg doesn't wait on stdin, a no-op sed -i fails, rm targets that start with a variable get the ${VAR:?} guard, a double-quoted pwsh -Command body with $ is refused, pipefail and errexit stop a git write after a failed step, git commands that can throw away another chat's uncommitted work are refused where repo-peers sees one, endless tail -f watches, jobs detached with & or nohup, and inline file-rewrite scripts are refused, and `edits` makes all-or-nothing text edits that keep line endings.",
   "author": {
     "name": "dante32683"
   }

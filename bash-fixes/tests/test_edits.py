@@ -460,6 +460,11 @@ class Findings(Base):
         self.assertEqual(code, 1)
         self.assertIn("Makefile recipe lines need a tab", err)
         self.assertEqual(self.get(p), b"all:\n\tcc a.c\n")
+        # A space-indented comment is not a recipe line: it only warns.
+        code, out, _ = self.run_edits(f"=== {p}\n--- old\n\tcc a.c\n+++ new\n\tcc a.c\n    # note\n")
+        self.assertEqual(code, 0)
+        self.assertIn("indents with spaces; the file uses tabs", out)
+        self.assertEqual(self.get(p), b"all:\n\tcc a.c\n    # note\n")
 
     def test_swap_checks_before_every_try(self):
         p = self.put("a", b"theirs\n")
@@ -544,14 +549,35 @@ class RoundThree(Base):
         self.assertIn("hard links", err)
         self.assertEqual(self.get(f"{self.dir}/b"), b"x\n")
 
-    def test_locks_live_in_the_state_folder_and_belong_to_their_owner(self):
+    def test_locks_live_in_the_state_folder_and_hold_until_released(self):
         p = self.put("a", b"x\n")
-        held, token = edits.lock([(p, b"", b"", "a")])
+        held = edits.lock([(p, b"", b"", "a")])
         self.assertEqual(os.listdir(self.dir), ["a"])
-        edits.unlock(held, "someone else")
-        self.assertTrue(os.path.exists(held[0]))
-        edits.unlock(held, token)
-        self.assertFalse(os.path.exists(held[0]))
+        name = held[0].name
+        old = os.path.getmtime(name) - 3600
+        os.utime(name, (old, old))  # age alone never frees a held lock
+        with open(name, "a+b") as other, self.assertRaises(OSError):
+            edits.os_lock(other)
+        edits.unlock(held)
+        with open(name, "a+b") as other:
+            edits.os_lock(other)  # free once its owner lets go
+
+    def test_failed_in_place_write_is_put_back(self):
+        p = self.put("a", b"ORIGINAL\n")
+        real_in_place, real_swap = edits.in_place, edits.swap
+
+        def partial(tmp, path, expected, data, shown):
+            with open(path, "r+b") as f:
+                f.write(data[:3])
+            raise OSError(5, "I/O error", path)
+        edits.in_place, edits.swap = (lambda path: True), partial
+        try:
+            failed, stuck = edits.commit([(p, b"UPDATED\n", b"ORIGINAL\n", "a")])
+        finally:
+            edits.in_place, edits.swap = real_in_place, real_swap
+        self.assertIn("I/O error", failed)
+        self.assertEqual(stuck, [])
+        self.assertEqual(self.get(p), b"ORIGINAL\n")
 
     def test_partly_written_is_reported_and_never_retried(self):
         p = self.put("a", b"x\n")
@@ -601,6 +627,16 @@ class RoundFour(Base):
         _, _, err = self.run_edits(f"=== {p}\n--- old\nit's here\n+++ new\nx\n")
         self.assertIn("curly quotes", err)
         self.assertIn("file line 1", err)
+
+    def test_opaque_character_hint(self):
+        # An icon-font glyph (private use) that the input dropped, or typed as a literal \uXXXX escape.
+        p = self.put("a.cs", 'Glyph = "", Size = 10;\n'.encode())
+        for typed in ('Glyph = "", Size = 10;', 'Glyph = "\\ue70d", Size = 10;'):
+            _, _, err = self.run_edits(f"=== {p}\n--- old\n{typed}\n+++ new\nx\n")
+            self.assertIn("private-use", err, typed)
+            self.assertIn("U+E70D", err, typed)
+            self.assertIn("<U+E70D>", err, typed)  # shown as a code point, never as a typeable escape
+        self.assertEqual(self.get(p), 'Glyph = "", Size = 10;\n'.encode())
 
     def test_many_matches_hint_names_the_count(self):
         p = self.put("a.txt", b"x\nx\nx\n")
@@ -690,14 +726,45 @@ class RoundSix(Base):
         self.assertEqual(self.run_edits(f"=== {q}\n--- old all\ncJSON_\n+++ new\nCJ_\n")[0], 0)
         self.assertEqual(self.get(q), b"CJ_Parse(x); CJ_Print(y);\n")
 
-    def test_old_text_over_several_lines_must_cover_whole_lines(self):
-        p = self.put("a.md", b"# Title\nResults (updated)\nend\n")
-        code, _, err = self.run_edits(f"=== {p}\n--- old\n# Title\nResults\n+++ new\n# Title\nScores\n")
+    def test_old_text_over_several_lines_may_start_or_end_partway(self):
+        # A heading plus the start of the next line is a common insertion anchor.
+        p = self.put("a.md", b"## Later\n\n- [ ] **Start the backfill**: soon\nend\n")
+        code, out, _ = self.run_edits(
+            f"=== {p}\n--- old\n## Later\n\n- [ ] **Start\n+++ new\n## Later\n\n- [ ] **New task**\n\n- [ ] **Start\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.get(p), b"## Later\n\n- [ ] **New task**\n\n- [ ] **Start the backfill**: soon\nend\n")
+        self.assertIn("Start the backfill**: soon", out)  # the partial last line is shown whole
+        q = self.put("b.md", b"# Title\nResults (updated)\nend\n")
+        code, out, _ = self.run_edits(f"=== {q}\n--- old\nTitle\nResults\n+++ new\nHeading\nScores\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.get(q), b"# Heading\nScores (updated)\nend\n")
+        self.assertIn("# Heading", out)
+        self.assertIn("Scores (updated)", out)
+
+    def test_old_ending_in_a_blank_line_is_literal_when_the_new_text_has_one(self):
+        # Testers' real anchors: a heading plus its blank line, then an insertion.
+        p = self.put("NOW.md", b"## Focus\n\n- **Energy:** fine\n")
+        code, _, _ = self.run_edits(f"=== {p}\n--- old\n## Focus\n\n+++ new\n## Focus\n\n- Finish it\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.get(p), b"## Focus\n\n- Finish it\n- **Energy:** fine\n")
+        q = self.put("TASKS.md", b"## Waiting\n\n- [ ] **Andy**\n")
+        code, _, _ = self.run_edits(f"=== {q}\n--- old\n## Waiting\n\n+++ new\n## Waiting\n\n- [ ] **Dad**\n\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.get(q), b"## Waiting\n\n- [ ] **Dad**\n\n- [ ] **Andy**\n")
+        # The blank line must really be there.
+        r = self.put("c.md", b"## Waiting\n- [ ] **Andy**\n")
+        code, _, err = self.run_edits(f"=== {r}\n--- old\n## Waiting\n\n+++ new\n## Waiting\n\n- x\n")
         self.assertEqual(code, 1)
-        self.assertIn("ends partway through file line 2, before '(updated)'", err)
-        code, _, err = self.run_edits(f"=== {p}\n--- old\nTitle\nResults (updated)\n+++ new\nx\n")
-        self.assertIn("starts partway through file line 1, after '#'", err)
-        self.assertEqual(self.get(p), b"# Title\nResults (updated)\nend\n")
+        self.assertEqual(self.get(r), b"## Waiting\n- [ ] **Andy**\n")
+        # New text ending in a blank line still reads as padding when the old text doesn't end in one.
+        code, _, err = self.run_edits(f"=== {r}\n--- old\n## Waiting\n+++ new\n## Held\n\n")
+        self.assertIn("end of the `+++ new` block", err)
+
+    def test_bare_plus_and_dash_new_read_as_the_new_marker(self):
+        p = self.put("a.md", b"## Decision\nbody\n")
+        self.assertEqual(self.run_edits(f"=== {p}\n--- old\n## Decision\n+++\n## Decisions\n")[0], 0)
+        self.assertEqual(self.run_edits(f"=== {p}\n--- old\nbody\n--- new\ntext\n")[0], 0)
+        self.assertEqual(self.get(p), b"## Decisions\ntext\n")
 
     def test_end_of_file_blank_lines_go_and_the_final_newline_stays(self):
         p = self.put("a.py", b"}\n\n\n\n")
@@ -884,6 +951,21 @@ class Recovery(Base):
         self.assertIn(b"changed since", blocked.stderr)
         self.assertEqual(self.get(p), b"someone else\n")
 
+    def test_retry_with_a_path_wrong_for_its_folder_says_how_to_run_here(self):
+        os.mkdir(f"{self.dir}/sub")
+        self.put("sub/a.md", b"x\n")
+        # Run from inside sub/ with a path written from the parent folder.
+        bad = self.cli(b"=== sub/a.md\n--- old\nx\n+++ new\ny\n", cwd=f"{self.dir}/sub")
+        self.assertEqual(bad.returncode, 2)
+        kept = self.kept(bad.stderr)
+        again = self.cli(b"", "--retry", kept, cwd=self.dir)
+        self.assertEqual(again.returncode, 2)
+        self.assertIn(f"to run it there: edits < {kept}".encode(), again.stderr)
+        self.assertNotIn(b"run again", again.stderr)
+        ok = self.cli(open(kept, "rb").read(), cwd=self.dir)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(self.get(f"{self.dir}/sub/a.md"), b"y\n")
+
     def test_retry_refuses_when_its_folder_is_gone(self):
         os.mkdir(f"{self.dir}/wt")
         self.put("wt/a.md", b"x\n")
@@ -939,7 +1021,6 @@ class Recovery(Base):
         done = self.cli(b"=== a.md\n--- old\nx\n+++ new\ny\n")
         self.assertEqual(done.stdout, b"edits: a.md (1 edit)\n")
         self.assertEqual([x for x in os.listdir(self.state.name) if x != "locks"], [])
-        self.assertEqual(os.listdir(os.path.join(self.state.name, "locks")), [])
 
 
 class Cli(Base):

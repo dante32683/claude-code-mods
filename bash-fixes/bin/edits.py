@@ -32,13 +32,14 @@ needs retyping:
 
 Text edits. `--- old` text is an exact substring (part of a line or several
 lines) and must match exactly once, overlapping matches included. Old text
-that starts with indentation must start where its line does, so a wrong
-indent misses instead of matching inside a deeper one; new text that starts
+that starts with indentation can't match inside a line's leading
+indentation, so a wrong indent misses instead of matching inside a deeper
+one; new text that starts
 with indentation, replacing old text that starts after a line's indentation,
 replaces that indentation too. When the old text covers only part of a line,
 the summary shows the whole changed line (also when only trailing spaces are
-left out); old text over several lines must
-start and end at line edges. An edit whose new text is already there (old
+left out), and the same holds for old text over several lines that starts or
+ends partway through a line. An edit whose new text is already there (old
 text plus what it adds) is refused as applied already, and an `all` whose
 matches are whole words in some places and parts of longer words in others
 is refused. `--- old
@@ -63,7 +64,8 @@ writing, edits prints each range's new lines with two lines of
 context on each side (over eight new lines, only the first and last three).
 
 Blocks. Marker lines start at column 0 and are exactly `=== <path>`,
-`--- old`, `--- old all`, `--- from`, `--- to`, `--- until` and `+++ new`. A
+`--- old`, `--- old all`, `--- from`, `--- to`, `--- until` and `+++ new`
+(a bare `+++` or `--- new` also reads as `+++ new`, a common slip). A
 block is every line up to the next marker, joined with newlines. A block
 can't start or end with a blank line: blank lines at its edges read as
 padding between edits, which would silently join or split lines. To change
@@ -134,7 +136,8 @@ class Text(NamedTuple):
     new: str
     all: bool
     line: int = 0  # input line of its `--- old`
-    eof: bool = False  # old ends with blank lines, so it only matches at the end of the file
+    eof: bool = False  # old ends with blank lines: a real blank line there, or the end of the file
+    tail: int = 0  # how many blank lines end the old text
 
 
 class Range(NamedTuple):
@@ -164,7 +167,7 @@ def parse(text):
     """Return [(path, [Text or Range, ...]), ...] in input order."""
     files = []
     padding = []  # blank lines at block edges, reported together at the end
-    tail_blanks = []  # old blocks ending in blank lines, fine only at the end of the file
+    tail_blanks = []  # old blocks ending in blank lines with none in their new text: end of file only
     block = None  # lines of the block being read
     edit = None  # dict of the edit being built
     field = None  # which part of it the block fills
@@ -178,13 +181,13 @@ def parse(text):
             edit[field + "@"] = block_start
         block = None
 
-    def check(lines, what, where, start):
+    def check(lines, what, where, start, end=True):
         if not any(line.strip() for line in lines):
             raise InputError(f"line {start - 1}: the {what} block has no content lines")
         # Collected, so one run reports every padded block.
         if lines[0].strip() == "":
             padding.append(f"input line {start} (start of the {what} block)")
-        if lines[-1].strip() == "":
+        if end and lines[-1].strip() == "":
             padding.append(f"input line {start + len(lines) - 1} (end of the {what} block)")
 
     def close_edit():
@@ -204,7 +207,14 @@ def parse(text):
                 # The separator above the `until` line is kept, so trailing blank lines here add nothing.
                 while new_lines and not new_lines[-1].strip():
                     new_lines.pop()
-            if new_lines:
+            old_tail = 0
+            if not edit["range"] and any(line.strip() for line in edit["old"]):
+                while not edit["old"][-1 - old_tail].strip():
+                    old_tail += 1
+            if new_lines and old_tail and not new_lines[-1].strip():
+                # Old text that ends in a blank line is literal, so new text may end in one too.
+                check(new_lines, "`+++ new`", where, edit["new@"], end=False)
+            elif new_lines:
                 check(new_lines, "`+++ new`", where, edit["new@"])
             new = "\n".join(new_lines)
             if edit["range"]:
@@ -219,11 +229,11 @@ def parse(text):
                 while body and not old_lines[body - 1].strip():
                     body -= 1
                 check(old_lines[:body] if body else old_lines, "`--- old`", where, edit["old@"])
-                if 0 < body < len(old_lines):
+                if 0 < body < len(old_lines) and not any(not line.strip() for line in new_lines):
                     tail_blanks.append(f"input line {edit['old@'] + body} (end of the `--- old` block; fine only"
                                        " where the blank lines run to the end of the file)")
                 files[-1][1].append(Text("\n".join(old_lines[:body] or old_lines), new, edit["all"], edit["line"],
-                                         0 < body < len(old_lines)))
+                                         0 < body < len(old_lines), old_tail))
         edit = None
 
     text = text.lstrip("\ufeff")
@@ -231,6 +241,8 @@ def parse(text):
     if lines and lines[-1] == "":
         lines.pop()  # the newline that ends the input
     for n, line in enumerate(lines, 1):
+        if line in ("+++", "--- new"):
+            line = "+++ new"  # a common slip for the new-text marker; no real file has these lines alone
         if not is_marker(line) and NEAR_MARKER.fullmatch(line):
             raise InputError(
                 f"line {n}: {line!r} looks like a marker but isn't exact (column 0, one space, nothing after);"
@@ -370,10 +382,28 @@ def fold(s):
     return s.translate(str.maketrans("\u2018\u2019\u201c\u201d\u2013\u2014\u2212\u00a0", "''\"\"--- "))
 
 
+def opaque(c):
+    """A character a heredoc can't reliably carry: private-use (icon-font glyphs such as Segoe Fluent's
+    U+E70D), format (zero-width space, BOM) or unassigned."""
+    return unicodedata.category(c) in ("Co", "Cf", "Cn")
+
+
 def visible(s):
     """s in quotes, with tabs, non-breaking spaces and other invisible
-    characters written as escapes; backslashes stay as they are."""
-    return "'" + "".join(c if c.isprintable() and c != "\u00a0" else repr(c)[1:-1] for c in s) + "'"
+    characters written as escapes; backslashes stay as they are. Opaque
+    characters show as <U+XXXX>, so they never look like a literal \\uXXXX
+    escape in the input."""
+    def one(c):
+        if opaque(c):
+            return f"<U+{ord(c):04X}>"
+        return c if c.isprintable() and c != "\u00a0" else repr(c)[1:-1]
+    return "'" + "".join(one(c) for c in s) + "'"
+
+
+def noopaque(s):
+    """s without opaque characters, and without the \\uXXXX escapes someone may have typed for them."""
+    s = re.sub(r"\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}", "", s)
+    return "".join(c for c in s if not opaque(c))
 
 
 def show(line, width=100):
@@ -437,6 +467,13 @@ def hint(text, needle, first_input_line=0):
     if squash(needle) and squash(needle) in squash(text):
         where = locate(text, needle, squash, first_input_line)
         return f"\n    hint: only whitespace differs (indentation, tabs, trailing or non-breaking spaces); copy the file's text{where}"
+    if noopaque(needle).strip() and noopaque(needle) in noopaque(text):
+        where = locate(text, needle, noopaque, first_input_line)
+        chars = ", ".join(sorted({f"U+{ord(c):04X}" for c in text if opaque(c)})[:3])
+        return ("\n    hint: only invisible or private-use characters differ: the file holds " + chars +
+                " (an icon-font glyph, zero-width space or BOM), which input text can't carry reliably, and a typed"
+                " \\uXXXX escape is literal text here; leave that character out of the old text (old text may be"
+                " part of a line, so match the text beside it) or anchor a range on other lines" + where)
     if len(text) >= BIG:
         return ""
     if nospace(needle) and nospace(needle) in nospace(text):
@@ -533,8 +570,9 @@ def diverge(text, old, first_input_line):
 
 def positions(text, old):
     """Where old matches, overlapping matches included. Old text that starts
-    with indentation must start where its line does, so a wrong indent can't
-    match inside a deeper one."""
+    with indentation can't start inside a line's own leading indentation, so
+    a wrong indent can't match inside a deeper one; it can still match after
+    other text on a line (inside a string, say)."""
     found, i = [], text.find(old)
     indented = old[:1] in (" ", "\t")
     while i >= 0:
@@ -550,9 +588,11 @@ def is_word(c):
 
 
 def shape_problem(text, edit):
-    """Matches a small model rarely means: old text over several lines whose
-    first or last line covers only part of a file line, and an `all` whose
-    matches are whole words in some places and parts of longer words in others."""
+    """Matches a model rarely means: an edit that changes nothing, a rerun that
+    would add its text twice, and an `all` whose matches are whole words in
+    some places and parts of longer words in others. Old text over several
+    lines may start or end partway through a line (a heading plus the start of
+    the next line is a common anchor); the summary shows those lines whole."""
     old, new, found = edit.old, edit.new, positions(text, edit.old)
     if new == old:
         return "the old and new text are the same, so this edit would change nothing; check the new text"
@@ -564,20 +604,6 @@ def shape_problem(text, edit):
                               or (new.endswith(old) and p >= grown and text.startswith(new, p - grown))):
                 return ("the file already has the new text here, so this edit looks applied already;"
                         " drop it, or give old text that only matches before the change")
-    if "\n" in old:
-        for p in found:
-            ls = text.rfind("\n", 0, p) + 1
-            end = p + len(old)
-            le = text.find("\n", end)
-            le = len(text) if le < 0 else le
-            line = text.count("\n", 0, p) + 1
-            if text[ls:p].strip():
-                return (f"the old text spans lines, but starts partway through file line {line}, after"
-                        f" {show(text[ls:p].strip())}; start it at the beginning of that line")
-            if text[end:le].strip():
-                return (f"the old text spans lines, but ends partway through file line"
-                        f" {line + old.count(chr(10))}, before {show(text[end:le].strip())}; end it at the end"
-                        " of that line")
     if edit.all and old and (is_word(old[0]) or is_word(old[-1])):
         inside = [p for p in found
                   if (is_word(old[0]) and p > 0 and is_word(text[p - 1]))
@@ -841,8 +867,8 @@ def state_folder():
 
 
 def state_dir():
-    """Where kept inputs and undo copies go; its own entries older than a day
-    are pruned, nothing else."""
+    """Where kept inputs, undo copies, and lock files go; its own entries
+    older than a day are pruned, nothing else."""
     folder = state_folder()
     os.makedirs(folder, exist_ok=True)
     cutoff = time.time() - 86400
@@ -853,6 +879,13 @@ def state_dir():
         try:
             if os.path.getmtime(path) < cutoff:
                 shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+        except OSError:
+            pass
+    locks = os.path.join(folder, "locks")
+    for name in os.listdir(locks) if os.path.isdir(locks) else []:
+        try:  # a lock in use can't be deleted on Windows; elsewhere one a day old isn't in use
+            if os.path.getmtime(os.path.join(locks, name)) < cutoff:
+                os.remove(os.path.join(locks, name))
         except OSError:
             pass
     return folder
@@ -911,50 +944,51 @@ def swap(tmp, path, expected, data, shown):
             time.sleep(0.05)
 
 
+def os_lock(f):
+    """Lock f's first byte without waiting; the OS frees it when the handle
+    closes or the process dies, so a lock is never stale and never stolen."""
+    if os.name == "nt":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def lock(writes):
-    """Hold a lock per target, in the state folder, while targets are checked
-    and replaced, so two edits runs never both pass the check and lose one's
-    change. Each lock holds a token so only its owner removes it; one older
-    than ten seconds is taken as stale."""
+    """Hold an OS lock per target, on a file in the state folder, while
+    targets are checked and replaced, so two edits runs never both pass the
+    check and lose one's change. Returns the open lock files."""
     folder = os.path.join(state_dir(), "locks")
     os.makedirs(folder, exist_ok=True)
-    token = os.urandom(8).hex()
     names = sorted({(hashlib.sha1(os.path.normcase(p).encode()).hexdigest(), shown) for p, _, _, shown in writes})
     held = []
     try:
         for digest, shown in names:
-            name = os.path.join(folder, digest)
+            f = open(os.path.join(folder, digest), "a+b")
             deadline = time.time() + 5
             while True:
                 try:
-                    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    with os.fdopen(fd, "w") as f:
-                        f.write(token)
-                    held.append(name)
+                    os_lock(f)
+                    held.append(f)
+                    os.utime(f.name)  # fresh, so pruning skips a lock in use
                     break
-                except (FileExistsError, PermissionError):  # Windows: a lock being deleted
-                    try:
-                        if time.time() - os.path.getmtime(name) > 10:
-                            os.remove(name)
-                            continue
-                    except OSError:
-                        pass
+                except OSError:
                     if time.time() > deadline:
+                        f.close()
                         raise Refused(f"{shown} is being written by another edits run; run again")
                     time.sleep(0.02)
     except (OSError, Refused):
-        unlock(held, token)
+        unlock(held)
         raise
-    return held, token
+    return held
 
 
-def unlock(held, token):
-    for name in held:
+def unlock(held):
+    for f in held:
         try:
-            with open(name, encoding="utf-8") as f:
-                mine = f.read() == token
-            if mine:
-                os.remove(name)
+            f.close()  # closing releases the lock
         except OSError:
             pass
 
@@ -964,26 +998,40 @@ def commit(writes):
     (problem, stuck): problem is None when all went well; stuck lists files
     that were written and couldn't be put back."""
     try:
-        held, token = lock(writes)
+        held = lock(writes)
     except (OSError, Refused) as e:
         return (str(e) if isinstance(e, Refused) else f"{e.strerror or e} ({slash(e.filename or '')})"), []
     try:
         return commit_locked(writes)
     finally:
-        unlock(held, token)
+        unlock(held)
 
 
 def commit_locked(writes):
-    staged, done = [], []
+    staged, done, current = [], [], None
     try:
         for path, data, _, _ in writes:
             staged.append(stage(path, data))
         for (path, data, original, shown), tmp in zip(writes, staged):
+            current = (path, original, shown) if tmp is None else None
             swap(tmp, path, original, data, shown)
+            current = None
             done.append((path, data, original, shown))
         return None, []
     except (OSError, Refused) as e:
         stuck = []
+        if current:
+            # An in-place write that failed may have left part of its data:
+            # put the original back unless the file still holds it.
+            path, original, shown = current
+            try:
+                with open(path, "r+b") as f:
+                    if f.read() != original:
+                        f.seek(0)
+                        f.write(original)
+                        f.truncate()
+            except OSError:
+                stuck.append((path, shown))
         for path, data, original, shown in reversed(done):
             tmp = None
             try:
@@ -1167,14 +1215,20 @@ def apply_all(stdin_text, out, err):
                 span_text = f"line {first}" if first == last else f"lines {first}-{last}"
                 where = f"  {job['shown']}, {marker} text on input {span_text}"
                 result, n, lines, merged = apply_edit(text, edit.old, edit.new, edit.all, edit.eof)
+                if result is None and edit.eof and "" in edit.new.split("\n"):
+                    # Mid-file, blank lines ending the old text are literal: they must be in the file,
+                    # and the new text takes their place (its own blank lines included).
+                    result, n, lines, merged = apply_edit(text, edit.old + "\n" * (edit.tail + 1),
+                                                          edit.new + "\n" if edit.new else "", edit.all)
                 if result is None:
                     want = "1 or more" if edit.all else "exactly 1"
                     msg = f"{where}: {n} matches, need {want}"
                     if n == 0 and edit.eof and positions(text, edit.old):
                         blank = edit.line + 2 + edit.old.count("\n")
                         msg += (f"\n    hint: the old text matches, but it ends with a blank line (input line {blank}), which is allowed"
-                                " only where the blank lines run to the end of the file; include the next content"
-                                " line in both old and new text (or drop the blank line)")
+                                " only where the blank lines run to the end of the file, or when the new text has a"
+                                " blank line too; include the next content line in both old and new text (or drop"
+                                " the blank line)")
                     elif n == 0:
                         done_at = looks_ran(text, edit.old, edit.new)
                         if positions(job["text"], edit.old):
@@ -1213,7 +1267,9 @@ def apply_all(stdin_text, out, err):
                         job["echo"][ln] = line.strip() + (" (its trailing spaces stay)" if line != line.rstrip() else "")
                     job["merged_at"] = k
             note = indent_warning(job["text"], edit.new)
-            if note and "with spaces; the file uses tabs" in note and is_makefile(job["path"]):
+            if (note and "with spaces; the file uses tabs" in note and is_makefile(job["path"])
+                    and "spaces" in indent_kinds(re.sub(r"(?m)^[ \t]+#.*$", "", edit.new))):
+                # Only recipe-like lines need tabs; a space-indented comment just warns.
                 new_at = (edit.end_line + edit.end.count("\n") + 2 if isinstance(edit, Range)
                           else edit.line + edit.old.count("\n") + 3)
                 failures.append(f"  {job['shown']}, `+++ new` text from input line {new_at}: Makefile recipe"
@@ -1320,6 +1376,7 @@ def main():
         # another. Any other file runs here, as `edits < file` would, and is kept.
         if not os.path.isfile(retry + ".cwd"):
             return run(text)
+        here = os.getcwd()
         try:
             with open(retry + ".cwd", encoding="utf-8") as f:
                 folder = f.read().strip()
@@ -1331,6 +1388,16 @@ def main():
                 file=sys.stderr,
             )
             return 2
+        # A path that was wrong for the first folder stays wrong on every retry; when it
+        # names a file in the shell's folder instead, say how to run the input there.
+        if os.path.normcase(here) != os.path.normcase(os.getcwd()):
+            names = [native_path(os.path.expanduser(p.strip())) for p in re.findall(r"^=== (.+)$", text, re.M)]
+            moved = [p for p in names if not os.path.isabs(p) and not os.path.exists(p) and os.path.isfile(os.path.join(here, p))]
+            if moved:
+                print(f"edits: nothing written: {slash(moved[0])} isn't in {slash(folder)}, the folder --retry runs in"
+                      f" (where it first ran), but is a file in {slash(here)}; to run it there: edits < {quote(retry)}",
+                      file=sys.stderr)
+                return 2
         return run(text, retry=retry)
     if args:
         print("edits: usage: edits <<'EDITS' ... EDITS, edits --retry FILE, edits --undo FOLDER, edits --help", file=sys.stderr)

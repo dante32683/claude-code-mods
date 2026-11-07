@@ -123,7 +123,28 @@ export function openMode(rest: string | undefined): string {
   return 'r'
 }
 
-export function rewritesFileInScript(command: string): boolean {
+const INTERPRETER = /(?:^|[\s;&|(`/\\])(?:python[\d.]*|py|node)(?:\.exe)?(?=[ \t])/
+
+// Drops the bodies of heredocs that feed anything but python or node (a file written
+// with cat > f <<'EOF', an edits block), so code inside them, such as a .replace( in
+// JavaScript source, isn't read as part of the script that runs. HEREDOC is below.
+export function scriptText(command: string): string {
+  const out: string[] = []
+  let end: string | undefined
+  for (const line of command.split('\n')) {
+    if (end !== undefined) {
+      if (line.trim() === end) end = undefined
+      continue
+    }
+    out.push(line)
+    const m = [...line.matchAll(HEREDOC)][0]
+    if (m && !INTERPRETER.test(line.slice(0, m.index))) end = m[3]
+  }
+  return out.join('\n')
+}
+
+export function rewritesFileInScript(full: string): boolean {
+  const command = scriptText(full)
   if (!INLINE_SCRIPT.test(command) || !TRANSFORM.test(command)) return false
   const reads = new Set<string>()
   const writes = new Set<string>()
@@ -341,5 +362,25 @@ export function hkcuWriteNote(command: string): string | undefined {
     'To write HKCU for real, put the commands in a .cmd (or a .cmd that runs pwsh -File on a .ps1) and run ' +
     'explorer.exe on it; it runs unelevated, outside the package. Check the result from an Explorer-launched ' +
     'process too.'
+  )
+}
+
+// A job left running with a trailing & or nohup outlives the Bash call, and
+// with it the hidden console that call ran in, so every console program it
+// starts later (gradlew, adb, git, claude -p) opens a visible terminal window
+// on the screen. A `wait` later in the command ends the
+// job inside the call, which is fine.
+const DETACH_AMP = /(?<![&|>0-9<])&(?![&>])[ \t]*(?:$|[;)\n]|#)/m
+const NOHUP = /(?:^|[;&|(\n]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*nohup\b/m
+
+export function detachedJobReason(command: string): string | undefined {
+  const text = withoutHeredocBodies(command).replace(/'[^'\n]*'|"(?:[^"\\\n]|\\.)*"/g, '""')
+  if (/(?:^|[;&|\n])\s*wait\b/m.test(text)) return undefined
+  if (!DETACH_AMP.test(text) && !NOHUP.test(text)) return undefined
+  return (
+    'A job detached with `&` or `nohup` outlives this call and its hidden console, so every console ' +
+    'program it starts (gradlew, adb, git, claude -p) opens a terminal window on the screen. Run it ' +
+    'with run_in_background instead (one Bash call per job; wait for its own completion notice), or end ' +
+    'the command with `wait` if the parallel jobs should finish inside this call.'
   )
 }
