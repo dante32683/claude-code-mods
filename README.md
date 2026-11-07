@@ -42,7 +42,7 @@ Better compaction. Before each compaction it saves a searchable history file in 
 
 ### repo-peers
 
-Tells Claude when other Claude chats are working in the same repo (same checkout or another worktree) and which files they've edited, so it can coordinate before work collides. A chat that starts working while yours is mid-task is named right away, not at your next message. Windows only for now.
+Tells Claude when other Claude chats are working in the same repo (same checkout or another worktree) and which files they've edited (including files Bash writes through `edits` or `cat >`), so it can coordinate before work collides. The note is one line per peer: working or idle, whether it's a new chat, and its three latest files (temp files left out; files you also edited are listed in full). A chat that starts working while yours is mid-task, or one that started and finished in between, is named right away, not at your next message. Windows only for now.
 
 ### aside
 
@@ -50,15 +50,16 @@ Tells Claude when other Claude chats are working in the same repo (same checkout
 
 ### bash-fixes
 
-Windows Git Bash only. It fixes a few ways Claude's Bash tool breaks there: very long commands get cut off or mangled, arguments starting with `/` get turned into Windows paths (`rg` patterns, `gh api` endpoints like `/repos/x`, and phone paths like `/sdcard` in `adb`), `sed -i` doesn't say when nothing changed, and `rm "${DIR:?}"/...` keeps asking for approval. It also stops a `git commit` from running after a failed check or edit earlier in the same command (pipefail where a pipe gates the rest, and `bash -e` for multi-line commands, since the tool's own shell ignores `set -e`).
+Windows Git Bash only. It fixes a few ways Claude's Bash tool breaks there: very long commands get cut off or mangled, arguments starting with `/` get turned into Windows paths (`rg` patterns, `gh api` endpoints like `/repos/x`, phone paths like `/sdcard` in `adb`, and `/switches` for `powercfg`, `schtasks`, `reg`, and other Windows tools), a bare `rg pattern` that waits forever on the tool's open stdin, `sed -i` doesn't say when nothing changed, and `rm "${DIR:?}"/...` keeps asking for approval. It also stops a `git commit` from running after a failed check or edit earlier in the same command (pipefail where a pipe gates the rest, and `bash -e` for multi-line commands, since the tool's own shell ignores `set -e`).
 
-It adds an `edits` command for exact-text edits from a heredoc: nothing is written unless every edit matches, each file keeps its line endings, a `--- from` / `--- until` range replaces a block without retyping it, and a miss says why (whitespace, blank lines, the nearest line) and keeps the input for `edits --retry`. Range runs save an `edits --undo`.
+It adds an `edits` command for exact-text edits from a heredoc: nothing is written unless every edit matches, each file keeps its line endings, a `--- from` / `--- until` range replaces a block without retyping it, and a miss says why (whitespace, blank lines, invisible or private-use characters shown as `<U+XXXX>`, the nearest line) and keeps the input for `edits --retry`. Range runs save an `edits --undo`.
 
 It refuses a few commands that go wrong quietly, saying what to run instead:
 
 - a `$` inside a double-quoted `pwsh -Command` body, which Bash expands first;
 - an inline `python` or `node` script that rewrites a file with `replace` or slicing (use `edits`, or put `[script-edit]` in the description);
 - a Monitor or background job built on `tail -f` with no end, which outlives what it watches;
+- a job detached with a trailing `&` or `nohup`, which outlives the call's hidden console so that every console program it starts later opens a terminal window (use `run_in_background`, or end the command with `wait`);
 - with `repo-peers` installed, git commands that can throw away another chat's uncommitted work (`stash`, `--autostash`, `reset --hard`, a merge or pull that isn't a fast-forward, checking out paths this chat didn't write) in a checkout where another chat is working; `[git-solo]` in the description skips it.
 
 In the Desktop app, a command that writes `HKCU` gets a note: the app is an MSIX package, so those writes land in its private registry, and the note gives the `explorer.exe` route that writes the real one.
